@@ -1,0 +1,25 @@
+{
+  "name": "synapse-typescript-demo",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "bob": "tsx src/bob-agent.ts",
+    "jeff": "tsx src/jeff-agent.ts",
+    "utilities": "tsx src/utilities-agent.ts",
+    "claude": "tsx src/claude-agent.ts",
+    "pipeline": "tsx src/document-pipeline.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "nats": "^2.28.0",
+    "uuid": "^10.0.0",
+    "@anthropic-ai/sdk": "^0.30.0",
+    "openai": "^4.70.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "tsx": "^4.19.0",
+    "@types/node": "^22.0.0",
+    "@types/uuid": "^10.0.0"
+  }
+}
