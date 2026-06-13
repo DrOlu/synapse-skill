@@ -69,11 +69,14 @@ This skill provides complete, runnable implementations for all architectures —
 ## Install
 
 ```bash
+# npm package (TypeScript/JavaScript)
+npm install synapse-nats-sdk
+
 # Install as a Claude Code skill
 npx skills add https://github.com/drolu/synapse-skill --skill synapse
 ```
 
-Published on [skills.sh/drolu/synapse-skill/synapse](https://www.skills.sh/drolu/synapse-skill/synapse).
+Published on [npm (synapse-nats-sdk)](https://www.npmjs.com/package/synapse-nats-sdk) and [skills.sh](https://www.skills.sh/drolu/synapse-skill/synapse).
 
 ## Quick Start (30 seconds)
 
@@ -216,7 +219,8 @@ See [setup.md#troubleshooting](./setup.md#troubleshooting) for full troubleshoot
 
 ## Further Resources
 
-- [Synapse on skills.sh](https://www.skills.sh/drolu/synapse-skill/synapse) — Install with `npx skills add https://github.com/drolu/synapse-skill --skill synapse`
+- [Synapse on npm](https://www.npmjs.com/package/synapse-nats-sdk) — `npm install synapse-nats-sdk`
+- [Synapse on skills.sh](https://www.skills.sh/drolu/synapse-skill/synapse) — `npx skills add https://github.com/drolu/synapse-skill --skill synapse`
 - [Synapse specification](https://synapse.ai)
 - [NATS documentation](https://docs.nats.io)
 - [Synadia Cloud](https://cloud.synadia.com) (free tier available)

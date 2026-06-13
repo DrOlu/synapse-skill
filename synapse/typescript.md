@@ -19,8 +19,13 @@ Complete TypeScript/Node.js SDK for building production-grade Synapse agents. In
 ## Installation
 
 ```bash
-npm init -y
-npm install nats uuid
+# Option 1: Install from npm (recommended)
+npm install synapse-nats-sdk
+
+# Option 2: Copy synapse.ts from examples/ into your project
+# (the full SDK file is self-contained — just import Synapse from "./synapse.js")
+
+# Dev dependencies (if using Option 1 or 2 with TypeScript)
 npm install -D typescript @types/node tsx
 ```
 
@@ -1954,6 +1959,7 @@ class ProtectedSynapse extends Synapse {
 
 | Limitation | Workaround / Notes |
 |---|---|
+| **~~No published npm package~~** | **Fixed.** Published on npm as [`synapse-nats-sdk`](https://www.npmjs.com/package/synapse-nats-sdk). `npm install synapse-nats-sdk`. |
 | **No NKey/JWT auth built in** | Pass `{ authenticator: nkeys.fromSeed(...) }` (or equivalent) as the second argument to `Synapse.connect()`. See the [NATS auth docs](https://docs.nats.io/running-a-nats-service/configuration/securing_nats). |
 | **No JetStream-backed registry persistence** | Registrations are in-memory. If a registry router process restarts, agents must re-register. Consider pairing with a JetStream KV store for durable manifests. |
 | **~~Discovery is peer-to-peer, not centralized~~** | **Fixed.** See [registry.md](./registry.md) — JetStream-backed registry service for deterministic discovery. |
