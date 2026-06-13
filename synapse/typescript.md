@@ -29,6 +29,19 @@ npm install synapse-nats-sdk
 npm install -D typescript @types/node tsx
 ```
 
+### Usage
+
+```typescript
+// Node.js / Bun (TCP transport)
+import Synapse from "synapse-nats-sdk";
+
+// Browser (WebSocket transport)
+import Synapse from "synapse-nats-sdk/browser";
+
+// HTTP Bridge (server-side only)
+import { HttpBridge } from "synapse-nats-sdk/http-bridge";
+```
+
 **TypeScript config (`tsconfig.json`):**
 
 ```json
@@ -1960,6 +1973,8 @@ class ProtectedSynapse extends Synapse {
 | Limitation | Workaround / Notes |
 |---|---|
 | **~~No published npm package~~** | **Fixed.** Published on npm as [`synapse-nats-sdk`](https://www.npmjs.com/package/synapse-nats-sdk). `npm install synapse-nats-sdk`. |
+| **~~No browser SDK (WebSocket wrapper)~~** | **Fixed.** `import Synapse from "synapse-nats-sdk/browser"` — thin WS wrapper over NATS v3 WebSocket (`wsconnect`). Connects to NATS server on WSS port 8443. |
+| **~~Migrate to @nats-io/transport-node~~** | **Fixed.** v2.0.0 — Node SDK uses `@nats-io/transport-node@^3.0.0` (TCP), Browser SDK uses `@nats-io/nats-core@^3.0.0` (WebSocket). |
 | **No NKey/JWT auth built in** | Pass `{ authenticator: nkeys.fromSeed(...) }` (or equivalent) as the second argument to `Synapse.connect()`. See the [NATS auth docs](https://docs.nats.io/running-a-nats-service/configuration/securing_nats). |
 | **No JetStream-backed registry persistence** | Registrations are in-memory. If a registry router process restarts, agents must re-register. Consider pairing with a JetStream KV store for durable manifests. |
 | **~~Discovery is peer-to-peer, not centralized~~** | **Fixed.** See [registry.md](./registry.md) — JetStream-backed registry service for deterministic discovery. |

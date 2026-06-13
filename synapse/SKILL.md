@@ -173,9 +173,15 @@ See **[http-bridge.md](./http-bridge.md)** for full bridge documentation.
    ┌────────────┐
    │ HTTP Agent │  (Flask/FastAPI/Express — zero NATS code)
    └────────────┘
+        │
+        │ Browser SDK (WebSocket)
+        ▼
+   ┌────────────┐
+   │ Browser    │  (React/Vue/Svelte — wsconnect to NATS:8443)
+   └────────────┘
 ```
 
-All agents speak Synapse via NATS. HTTP agents join through the bridge with zero NATS code required.
+All agents speak Synapse: servers via TCP, browsers via WebSocket, HTTP services via the bridge.
 
 ## Decision Matrix
 
