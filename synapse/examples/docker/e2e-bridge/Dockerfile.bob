@@ -1,0 +1,5 @@
+FROM node:20-alpine
+WORKDIR /app
+RUN npm install synapse-nats-sdk
+COPY bob_caller.mjs .
+CMD ["node", "bob_caller.mjs"]

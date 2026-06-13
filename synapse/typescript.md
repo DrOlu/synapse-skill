@@ -1969,3 +1969,4 @@ class ProtectedSynapse extends Synapse {
 | **~~Heartbeat inconsistency across SDKs~~** | **Fixed.** All SDKs now publish to `mesh.heartbeat.{id}` with a consistent envelope format. |
 | **~~No streaming request/reply~~** | **Fixed.** See [Streaming Primitives](#streaming-primitives) — `streamRequest()` / `onStreamRequest()` with async generators. Works with Anthropic SDK streaming. |
 | **~~No built-in conversation state / task persistence~~** | **Fixed.** See [tasks.md](./tasks.md) — JetStream-backed task store with state machine enforcement, `getTask()`, multi-turn conversation linking via `context_id`, and real-time dashboard support. |
+| **~~No HTTP bridge for REST agents~~** | **Fixed.** See [http-bridge.md](./http-bridge.md) — bidirectional bridge wraps any Flask/FastAPI/Express agent as a Synapse participant. Zero NATS code on the HTTP side. Webhook API for HTTP→Synapse calls. |

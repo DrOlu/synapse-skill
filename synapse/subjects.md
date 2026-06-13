@@ -83,3 +83,38 @@ curl http://localhost:8222/leafz
 # Health
 curl http://localhost:8222/healthz
 ```
+
+## HTTP Bridge Subjects
+
+The HTTP bridge exposes these endpoints to allow HTTP agents to interact with the Synapse mesh:
+
+| Endpoint | Method | Purpose |
+|----------|--------|--------|
+| `POST /mesh/discover` | HTTP | Discover Synapse agents by capability |
+| `POST /mesh/request` | HTTP | Call a Synapse agent's skill from HTTP |
+| `GET /mesh/health` | HTTP | Bridge health check |
+
+HTTP agents themselves use standard REST endpoints (e.g., `POST /skill/chat`) — the bridge proxies between these and the corresponding `mesh.agent.{id}.inbox` NATS subjects.
+
+### Request format: `POST /mesh/request`
+
+```json
+{
+  "agentId": "target-agent-id",
+  "skill": "skill-id",
+  "input": { "text": "Hello!" },
+  "timeout": 30.0
+}
+```
+
+### Response format
+
+```json
+{ "output": { "text": "Hello from the agent!" } }
+```
+
+### Error format
+
+```json
+{ "error": "Skill not found", "code": 3001, "retryable": false }
+```

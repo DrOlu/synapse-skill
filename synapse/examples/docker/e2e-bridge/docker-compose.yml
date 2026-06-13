@@ -1,0 +1,62 @@
+version: "3.8"
+
+services:
+  nats:
+    image: nats:2.11-alpine
+    container_name: nats-server
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: ["-js", "-m", "8222"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Pure Flask agent — knows nothing about NATS/Synapse
+  flask-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.flask
+    container_name: flask-chat-agent
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      FLASK_RUN_PORT: "5000"
+    ports:
+      - "5000:5000"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:5000/skill/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # Bridge connects Flask agent to Synapse mesh
+  bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.bridge
+    container_name: synapse-bridge
+    depends_on:
+      nats:
+        condition: service_healthy
+      flask-agent:
+        condition: service_healthy
+    environment:
+      NATS_URL: nats://nats:4222
+      FLASK_AGENT_URL: http://flask-agent:5000
+    ports:
+      - "4100:4100"
+
+  # Bob is a native Synapse agent that will call the Flask agent
+  bob-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.bob
+    container_name: bob-agent
+    depends_on:
+      - bridge
+    environment:
+      NATS_URL: nats://nats:4222

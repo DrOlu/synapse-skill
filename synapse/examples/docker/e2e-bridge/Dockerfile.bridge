@@ -1,0 +1,8 @@
+FROM python:3.11-slim
+WORKDIR /app
+RUN pip install nats-py aiohttp
+COPY bridge_runner.py .
+COPY synapse.py .
+COPY http_bridge.py .
+EXPOSE 4100
+CMD ["python", "bridge_runner.py"]

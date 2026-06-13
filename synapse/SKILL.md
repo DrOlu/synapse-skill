@@ -51,6 +51,7 @@ This skill provides complete, runnable implementations for all architectures —
 - **[schema.md](./schema.md)** — JSON Schema validation for envelopes, manifests, and task updates (TypeScript/Python/Go)
 - **[registry.md](./registry.md)** — JetStream-backed registry service for deterministic discovery
 - **[tasks.md](./tasks.md)** — JetStream-backed task store: state machine persistence, conversation linking, querying
+- **[http-bridge.md](./http-bridge.md)** — Bidirectional HTTP↔Synapse bridge: wrap any REST/Flask/FastAPI agent as a Synapse participant
 
 ### Reference
 - **[envelope.md](./envelope.md)** — Complete message envelope format, trace fields, error codes
@@ -64,6 +65,7 @@ This skill provides complete, runnable implementations for all architectures —
 - **[examples/python/](./examples/python/)** — Full Python projects (LLM agents, delegation chains)
 - **[examples/go/](./examples/go/)** — Full Go projects (high-throughput mesh, JetStream persistence)
 - **[examples/docker/](./examples/docker/)** — Multi-container setups (local dev, Synadia, leaf nodes)
+- **[examples/docker/e2e-bridge/](./examples/docker/e2e-bridge/)** — End-to-end HTTP bridge demo (Flask ↔ Synapse ↔ Bob)
 - **[examples/cross-org/](./examples/cross-org/)** — Complete Acme+Globex multi-company setup with credentials
 
 ## Install
@@ -117,6 +119,27 @@ python summarizer_agent.py
 
 See **[python.md](./python.md)** for full code.
 
+### Option 4: HTTP Bridge (existing REST agent)
+
+```typescript
+// Wrap any Flask/FastAPI/Express agent into Synapse — zero NATS code on their side
+import Synapse from "synapse-nats-sdk";
+import { HTTPBridge } from "./http-bridge.js";
+
+const mesh = await Synapse.connect("nats://localhost:4222");
+const bridge = new HTTPBridge(mesh, 4100);
+await bridge.registerAgent({
+  id: "flask-chat-001", name: "Flask Chat Agent",
+  baseUrl: "http://localhost:5000",
+  capabilities: ["chat"],
+  skills: [{ id: "chat", name: "Chat", description: "Chat" }],
+});
+await bridge.startWebhook();
+// Flask agent is now discoverable and callable from any Synapse agent
+```
+
+See **[http-bridge.md](./http-bridge.md)** for full bridge documentation.
+
 ## Architecture Overview
 
 ```
@@ -144,9 +167,15 @@ See **[python.md](./python.md)** for full code.
    │ Agent A │      │Agent B │      │ Agent C │
    │(TypeSC) │      │(Python)│      │ (CLI)   │
    └─────────┘      └────────┘      └─────────┘
+        │
+        │ HTTP Bridge
+        ▼
+   ┌────────────┐
+   │ HTTP Agent │  (Flask/FastAPI/Express — zero NATS code)
+   └────────────┘
 ```
 
-All three agents speak Synapse. They don't know or care about each other's implementation language.
+All agents speak Synapse via NATS. HTTP agents join through the bridge with zero NATS code required.
 
 ## Decision Matrix
 
