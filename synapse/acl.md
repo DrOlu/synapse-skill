@@ -596,9 +596,266 @@ The trust store can be:
 | Agent eavesdrops on other agents' traffic | ⚠️ partial — NATS accounts/permissions needed |
 | Unauthorized agent requests a privileged skill | ✅ yes — inbound ACL |
 | Agent sends malformed envelopes | ✅ yes — signature fails |
-| DDoS from trusted agent | ❌ no — need rate limiting (see backpressure) |
+| DDoS from trusted agent | ❌ no — need rate limiting (see Production Features) |
+| Cascading failures from downstream | ❌ no — need circuit breakers (see Production Features) |
+| Compliance audit requirements | ❌ no — need audit logging (see Production Features) |
 
 ACL is **not a replacement** for NATS-level account isolation — it's a complementary layer.
+
+---
+
+## Production Features
+
+ACL provides cryptographic identity and authorization, but production systems need additional guardrails for resilience, compliance, and operational visibility. Synapse provides three production-grade features that integrate seamlessly with ACL:
+
+| Feature | Purpose | Integration Point |
+|---------|---------|-------------------|
+| **Per-Endpoint Rate Limiting** | Prevent abuse and resource exhaustion | Before ACL verification |
+| **Circuit Breakers** | Protect against cascading failures | Around handler execution |
+| **Audit Logging** | Compliance, forensics, observability | After handler completion |
+
+### Per-Endpoint Rate Limiting
+
+Unlike global rate limiting, per-endpoint rate limiting allows different limits per skill, enabling fine-grained control:
+
+```typescript
+const rateLimiter = new PerEndpointLimiter({
+  'process-payment': { maxConcurrent: 5, maxPerSecond: 10 },
+  'get-balance': { maxConcurrent: 50, maxPerSecond: 100 },
+  'refund': { maxConcurrent: 10, maxPerSecond: 5 },
+});
+```
+
+**Why per-endpoint?**
+- Payment processing is expensive → strict limits
+- Balance queries are cheap → liberal limits
+- Refunds are sensitive → moderate limits
+
+**Integration with ACL:**
+
+```typescript
+mesh.onRequest('*', async (payload, ctx) => {
+  // 1. Rate limiting (before ACL check)
+  if (!rateLimiter.tryAcquire(ctx.skill)) {
+    return { error: 'Rate limit exceeded', code: 429 };
+  }
+  
+  // 2. ACL verification (already enforced by ACLSynapse)
+  // ctx.caller_identity is verified
+  
+  // 3. Handler execution
+  return await handler(payload, ctx);
+});
+```
+
+### Circuit Breakers
+
+Protect your agent from cascading failures when downstream services are degraded:
+
+```typescript
+const circuit = new CircuitBreaker({
+  failureThreshold: 5,        // Open after 5 consecutive failures
+  recoveryTimeout: 30000,     // Try half-open after 30s
+  successThreshold: 2,        // Close after 2 successes
+});
+
+mesh.onRequest('process-payment', circuit.wrap(async (payload) => {
+  // If circuit is OPEN, this never runs
+  // If circuit is HALF-OPEN, only one request runs at a time
+  return await paymentGateway.process(payload);
+}));
+```
+
+**Circuit Breaker States:**
+
+```
+CLOSED ──(5 failures)──> OPEN ──(30s timeout)──> HALF-OPEN
+   ↑                                                 │
+   │                                                 │
+   └──────(2 successes)──────────────────────────────┘
+```
+
+- **CLOSED**: Normal operation, monitoring failures
+- **OPEN**: Rejecting all requests (fast-fail)
+- **HALF-OPEN**: Testing with limited requests
+
+**Integration with ACL:**
+
+```typescript
+mesh.onRequest('*', async (payload, ctx) => {
+  // 1. Rate limiting
+  if (!rateLimiter.tryAcquire(ctx.skill)) {
+    return { error: 'Rate limit exceeded', code: 429 };
+  }
+  
+  // 2. ACL verification (already enforced)
+  
+  // 3. Circuit breaker (protect downstream)
+  const result = await circuit.execute(ctx.skill, async () => {
+    return await handler(payload, ctx);
+  });
+  
+  return result;
+});
+```
+
+### Compliance Audit Logging
+
+Every request and response is logged in a tamper-proof, cryptographically signed audit trail:
+
+```typescript
+const auditLogger = new AuditLogger({
+  streamName: 'compliance-audit',
+  signingKey: agentKey,
+  retentionDays: 365 * 7,  // 7 years
+});
+
+mesh.onRequest('*', async (payload, ctx) => {
+  // 1. Rate limiting
+  if (!rateLimiter.tryAcquire(ctx.skill)) {
+    await auditLogger.log({
+      type: 'rate_limited',
+      skill: ctx.skill,
+      caller: ctx.caller_identity,
+      reason: 'max_per_second',
+    });
+    return { error: 'Rate limit exceeded', code: 429 };
+  }
+  
+  // 2. ACL verification (already enforced)
+  
+  // 3. Circuit breaker
+  const result = await circuit.execute(ctx.skill, async () => {
+    return await handler(payload, ctx);
+  });
+  
+  // 4. Audit logging (after completion)
+  await auditLogger.log({
+    type: 'request_completed',
+    skill: ctx.skill,
+    caller: ctx.caller_identity,
+    task_id: ctx.task_id,
+    duration_ms: Date.now() - ctx.startTime,
+    status: result.error ? 'error' : 'success',
+  });
+  
+  return result;
+});
+```
+
+**Audit Log Features:**
+- **Tamper-proof**: Each entry signed with Ed25519
+- **Chain of custody**: Entries reference previous hash
+- **JetStream storage**: NATS-native, persistent, queryable
+- **Compliance exports**: SOC 2, GDPR, PCI DSS ready
+
+**Querying audit logs:**
+
+```typescript
+// Last 24 hours
+const entries = await auditLogger.query({
+  since: new Date(Date.now() - 86400000),
+  type: 'request_completed',
+});
+
+// Failed requests from specific caller
+const failures = await auditLogger.query({
+  caller: 'org/agent-x',
+  status: 'error',
+});
+
+// Generate compliance report
+const report = await auditLogger.generateReport({
+  startDate: new Date('2024-01-01'),
+  endDate: new Date('2024-12-31'),
+  format: 'soc2',  // or 'gdpr', 'pci', 'custom'
+});
+```
+
+### Complete Production Integration
+
+Here's the full stack integrating ACL + rate limiting + circuit breakers + audit logging:
+
+```typescript
+import { ACLSynapse } from './synapse-acl.js';
+import { PerEndpointLimiter } from './per-endpoint-limiter.js';
+import { CircuitBreaker } from './circuit-breaker.js';
+import { AuditLogger } from './audit-logger.js';
+
+// 1. Initialize ACL
+const mesh = await ACLSynapse.connect({
+  agentIdentity: 'org/payment-agent',
+  trustStorePath: './trust-store.json',
+});
+
+// 2. Initialize production features
+const rateLimiter = new PerEndpointLimiter({ /* per-skill limits */ });
+const circuit = new CircuitBreaker({ /* thresholds */ });
+const auditLogger = new AuditLogger({ /* signing config */ });
+
+// 3. Register handlers with full production stack
+mesh.onRequest('*', async (payload, ctx) => {
+  const startTime = Date.now();
+  
+  try {
+    // Rate limiting
+    if (!rateLimiter.tryAcquire(ctx.skill)) {
+      await auditLogger.log({
+        type: 'rate_limited',
+        skill: ctx.skill,
+        caller: ctx.caller_identity,
+      });
+      return { error: 'Rate limit exceeded', code: 429 };
+    }
+    
+    // Circuit breaker
+    const result = await circuit.execute(ctx.skill, async () => {
+      return await handler(payload, ctx);
+    });
+    
+    // Audit success
+    await auditLogger.log({
+      type: 'request_completed',
+      skill: ctx.skill,
+      caller: ctx.caller_identity,
+      task_id: ctx.task_id,
+      duration_ms: Date.now() - startTime,
+      status: 'success',
+      circuit_state: circuit.getState(ctx.skill),
+    });
+    
+    return result;
+    
+  } catch (error) {
+    // Audit failure
+    await auditLogger.log({
+      type: 'request_failed',
+      skill: ctx.skill,
+      caller: ctx.caller_identity,
+      task_id: ctx.task_id,
+      duration_ms: Date.now() - startTime,
+      status: 'error',
+      error: error.message,
+      circuit_state: circuit.getState(ctx.skill),
+    });
+    
+    return { error: error.message, code: 500 };
+  }
+});
+```
+
+### Production Deployment
+
+For production deployment, use the complete example in [`examples/acl/production-demo.mjs`](./examples/acl/production-demo.mjs):
+
+- ✅ ACL with key rotation
+- ✅ Per-endpoint rate limiting
+- ✅ Circuit breakers with adaptive thresholds
+- ✅ Signed audit logging to JetStream
+- ✅ Monitoring integrations (Prometheus, Grafana)
+- ✅ Compliance reporting (SOC 2, GDPR, PCI DSS)
+
+See [`examples/acl/INTEGRATION.md`](./examples/acl/INTEGRATION.md) for detailed integration guide.
 
 ---
 
@@ -638,3 +895,5 @@ mesh.onRequest("fetch-transactions", async (input, ctx) => {
 - [Security](./security.md) — NATS NKeys, JWT, TLS, signed envelopes
 - [Cross-Org](./cross-org.md) — Leaf nodes + accounts for org isolation
 - [Failure Modes](./failure-modes.md) — Revocation during network partitions
+- [Production Integration](./examples/acl/INTEGRATION.md) — Rate limiting, circuit breakers, audit logging
+- [Production Demo](./examples/acl/production-demo.mjs) — Complete production setup example
