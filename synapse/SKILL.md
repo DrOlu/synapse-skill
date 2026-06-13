@@ -1,6 +1,6 @@
 ---
 name: synapse
-description: Complete implementation guide for Synapse protocol — build multi-agent systems on NATS using CLI or code (TypeScript, Python, Go). Covers all 6 primitives, real-world patterns, security, cross-org topology, and production deployment.
+description: Complete implementation guide for Synapse protocol — build multi-agent systems on NATS using CLI or code (TypeScript, Python, Go). Covers all 6 primitives, real-world patterns, security (cryptographic ACL, NKeys, JWT), cross-org topology, and production deployment.
 ---
 
 # Synapse: Synapse Implementation Skill
@@ -18,6 +18,7 @@ This skill provides complete, runnable implementations for all architectures —
 - Create lightweight "infrastructure agents" using only the NATS CLI
 - Want persistent, reliable messaging (JetStream) with distributed tracing built-in
 - Need peer-to-peer agent communication (not manager→worker hierarchies)
+- Require cryptographic identity verification (reject unauthorized callers with signed envelopes)
 
 ## The 6 Primitives (Quick Reference)
 
@@ -44,6 +45,7 @@ This skill provides complete, runnable implementations for all architectures —
 ### Architecture & Patterns
 - **[patterns.md](./patterns.md)** — Real-world patterns: routing, delegation, fan-out, streaming, heartbeat
 - **[security.md](./security.md)** — NKeys, JWT auth, Ed25519, multi-tenant permissions, signed envelopes
+- **[acl.md](./acl.md)** — Cryptographic ACL: Ed25519 identity, trust store, key rotation, revocation
 - **[cross-org.md](./cross-org.md)** — Leaf node topology, firewall traversal, Acme↔Globex scenario
 
 ### Reliability
@@ -61,6 +63,7 @@ This skill provides complete, runnable implementations for all architectures —
 
 ### Runnable Examples
 - **[examples/cli/](./examples/cli/)** — Bash scripts: static agents, monitors, log watchers
+- **[examples/acl/](./examples/acl/)** — Cryptographic ACL demo: signed envelopes, trust store, key rotation
 - **[examples/typescript/](./examples/typescript/)** — Full TypeScript projects (2-agent chat, event pipeline, routing)
 - **[examples/python/](./examples/python/)** — Full Python projects (LLM agents, delegation chains)
 - **[examples/go/](./examples/go/)** — Full Go projects (high-throughput mesh, JetStream persistence)

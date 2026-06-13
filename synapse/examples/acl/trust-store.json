@@ -1,0 +1,38 @@
+{
+  "drolu/omp-orchestrator": {
+    "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAXINhDeqoqeoyWmf/yQm3+cYyUgwAGeS93bE1TzEwwS8=\n-----END PUBLIC KEY-----\n",
+    "fingerprint": "sha256:b27c076b7e412929",
+    "allow_outbound": [
+      "drolu/pi-paystack-agent"
+    ],
+    "allow_inbound": [],
+    "revoked": false,
+    "since": "2026-06-13T20:40:52.163Z",
+    "trusted_pubkeys": [
+      {
+        "pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAwjaSeeLIK9T6VrfnRmctOGdG5+LsYp916sbZGf74JRc=\n-----END PUBLIC KEY-----\n",
+        "fingerprint": "sha256:9a00f681343c0ed4",
+        "since": "2026-06-13T20:42:02.834Z",
+        "expires": "2026-07-13T20:42:02.834Z"
+      },
+      {
+        "pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA/sajtFBCorQyzfPDcgN+tSBwuwYHEYvISPknposRwrY=\n-----END PUBLIC KEY-----\n",
+        "fingerprint": "sha256:681b58704d1c609a",
+        "since": "2026-06-13T20:42:10.153Z",
+        "expires": "2026-07-13T20:42:10.153Z"
+      }
+    ],
+    "rotated_at": "2026-06-13T20:42:10.153Z"
+  },
+  "drolu/pi-paystack-agent": {
+    "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAVmExCYT17RvZgfyoYMcJ3JnD2KgMDv9U463taDLN6Pw=\n-----END PUBLIC KEY-----\n",
+    "fingerprint": "sha256:4c5d422398861ddf",
+    "allow_outbound": [],
+    "allow_inbound": [
+      "drolu/omp-orchestrator"
+    ],
+    "revoked": false,
+    "since": "2026-06-13T20:40:52.164Z",
+    "trusted_pubkeys": []
+  }
+}

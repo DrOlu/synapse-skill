@@ -1,0 +1,15 @@
+{
+  "name": "synapse-acl-examples",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "ACL implementation examples for Synapse protocol",
+  "scripts": {
+    "gen-keys": "node gen-keys.mjs",
+    "demo": "node acl-demo.mjs",
+    "rotation-test": "node rotation-test.mjs",
+    "identity": "node synapse-identity.mjs"
+  },
+  "dependencies": {
+    "nats": "^2.x.x"
+  }
+}

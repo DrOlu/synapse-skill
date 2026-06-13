@@ -1,0 +1,12 @@
+# Private keys - NEVER commit
+keys/
+*.pem
+*-identity.json
+
+# Backups may contain encrypted keys
+backups/
+*.enc
+
+# Test artifacts
+*-test-*.json
+test-*/
