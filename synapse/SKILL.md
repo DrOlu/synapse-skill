@@ -46,10 +46,17 @@ This skill provides complete, runnable implementations for all architectures —
 - **[security.md](./security.md)** — NKeys, JWT auth, Ed25519, multi-tenant permissions, signed envelopes
 - **[cross-org.md](./cross-org.md)** — Leaf node topology, firewall traversal, Acme↔Globex scenario
 
+### Reliability
+- **[observability.md](./observability.md)** — OpenTelemetry tracing, metrics, Grafana dashboards, W3C interop
+- **[schema.md](./schema.md)** — JSON Schema validation for envelopes, manifests, and task updates (TypeScript/Python/Go)
+- **[registry.md](./registry.md)** — JetStream-backed registry service for deterministic discovery
+- **[tasks.md](./tasks.md)** — JetStream-backed task store: state machine persistence, conversation linking, querying
+
 ### Reference
 - **[envelope.md](./envelope.md)** — Complete message envelope format, trace fields, error codes
 - **[states.md](./states.md)** — Task state machine and state transition rules
 - **[subjects.md](./subjects.md)** — Full subject namespace with wildcards and permissions
+- **[comparison.md](./comparison.md)** — How Synapse compares to A2A, MCP, ANP, RepoWire
 
 ### Runnable Examples
 - **[examples/cli/](./examples/cli/)** — Bash scripts: static agents, monitors, log watchers
@@ -58,6 +65,15 @@ This skill provides complete, runnable implementations for all architectures —
 - **[examples/go/](./examples/go/)** — Full Go projects (high-throughput mesh, JetStream persistence)
 - **[examples/docker/](./examples/docker/)** — Multi-container setups (local dev, Synadia, leaf nodes)
 - **[examples/cross-org/](./examples/cross-org/)** — Complete Acme+Globex multi-company setup with credentials
+
+## Install
+
+```bash
+# Install as a Claude Code skill
+npx skills add https://github.com/drolu/synapse-skill --skill synapse
+```
+
+Published on [skills.sh/drolu/synapse-skill/synapse](https://www.skills.sh/drolu/synapse-skill/synapse).
 
 ## Quick Start (30 seconds)
 
@@ -139,7 +155,11 @@ All three agents speak Synapse. They don't know or care about each other's imple
 | High-throughput data pipeline | [Go](./go.md) SDK |
 | Cross-org coordination (firewalls) | [Cross-Org Guide](./cross-org.md) |
 | Need guaranteed delivery | JetStream (Go SDK) |
-| Want observability/debugging | All SDKs support `trace` field — propagate via NATS headers |
+| Need streaming responses (LLM tokens) | [Streaming Primitives](./typescript.md#streaming-primitives) — `streamRequest()` / `onStreamRequest()` |
+| Need conversation history / task persistence | [Task Store](./tasks.md) — JetStream-backed task lifecycle + multi-turn linking |
+| Want observability/debugging | [Observability Guide](./observability.md) — OTel tracing, metrics, Grafana |
+| Need message validation | [Schema Guide](./schema.md) — JSON Schema for all message types |
+| Comparing with A2A/MCP | [Comparison Guide](./comparison.md) |
 
 ## Comparison with Other Protocols
 
@@ -159,10 +179,16 @@ Before going to production, verify:
 - [ ] Error codes are standardized and documented (see envelope.md)
 - [ ] Task timeouts are enforced (default: 30s)
 - [ ] Heartbeats are running (30s interval)
-- [ ] Tracing is propagated via W3C Trace Context
-- [ ] Monitoring dashboard is set up (NATS monitoring port)
+- [ ] Tracing is propagated via W3C Trace Context (see [observability.md](./observability.md))
+- [ ] Monitoring dashboard is set up (NATS monitoring port + Grafana, see [observability.md](./observability.md))
 - [ ] Leaf node connections are TLS-encrypted for cross-org traffic
 - [ ] Credential rotation plan is in place (jwt expiry, nkey rotation)
+- [ ] Envelope validation is enabled on send and receive (see [schema.md](./schema.md))
+- [ ] Manifest validation rejects malformed registrations (error code 2002)
+- [ ] OTLP endpoint is configured for trace/metric export
+- [ ] Circuit breakers protect overloaded agents (see [patterns.md](./patterns.md))
+- [ ] Backpressure / flow control enabled (concurrency limits, adaptive rate limiting)
+- [ ] Heartbeats use consistent format across all SDKs (`mesh.heartbeat.{id}` with envelope)
 
 ## Troubleshooting
 
@@ -190,6 +216,7 @@ See [setup.md#troubleshooting](./setup.md#troubleshooting) for full troubleshoot
 
 ## Further Resources
 
+- [Synapse on skills.sh](https://www.skills.sh/drolu/synapse-skill/synapse) — Install with `npx skills add https://github.com/drolu/synapse-skill --skill synapse`
 - [Synapse specification](https://synapse.ai)
 - [NATS documentation](https://docs.nats.io)
 - [Synadia Cloud](https://cloud.synadia.com) (free tier available)

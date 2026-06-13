@@ -460,10 +460,20 @@ func (am *Synapse) heartbeatLoop(interval time.Duration) {
         case <-am.ctx.Done():
             return
         case <-ticker.C:
-            am.Emit("heartbeat.agent", map[string]interface{}{
-                "agent_id":  am.id,
-                "timestamp": time.Now().UTC().Format(time.RFC3339),
-            })
+            // Publish to mesh.heartbeat.{id} (consistent with TS/Python SDKs)
+            envelope := Envelope{
+                V:    "1.0.0",
+                ID:   uuid.New().String(),
+                Type: "heartbeat",
+                TS:   time.Now().UTC().Format(time.RFC3339),
+                From: am.id,
+                Payload: map[string]interface{}{
+                    "agent_id":  am.id,
+                    "timestamp": time.Now().UTC().Format(time.RFC3339),
+                },
+            }
+            data, _ := json.Marshal(envelope)
+            am.nc.Publish(fmt.Sprintf("mesh.heartbeat.%s", am.id), data)
         }
     }
 }
@@ -739,7 +749,436 @@ func main() {
 
 ---
 
+## Streaming Primitives
+
+Synapse supports incremental responses via a stream subject per task.
+Each task gets its own subject: `mesh.task.{task_id}.stream`.
+Chunks are published as individual NATS messages; the final message has `done: true`.
+
+### Caller side: `StreamRequest()`
+
+Returns a channel yielding each chunk as it arrives.
+
+```go
+stream, err := mesh.StreamRequest(agentID, "analyze", map[string]interface{}{"text": "huge doc"}, 30*time.Second)
+if err != nil {
+    log.Fatal(err)
+}
+
+for chunk := range stream.Chunks() {
+    fmt.Printf("chunk: %v\n", chunk)
+}
+// channel closes when done: true arrives
+```
+
+### Handler side: `OnStreamRequest()`
+
+Registers a handler that sends chunks via a callback.
+
+```go
+mesh.OnStreamRequest("analyze", func(payload map[string]interface{}, ctx map[string]string, send func(interface{}) error) error {
+    text, _ := payload["input"].(map[string]interface{})["text"].(string)
+    for i, word := range strings.Fields(text) {
+        if err := send(map[string]interface{}{"word": word, "index": i}); err != nil {
+            return err
+        }
+    }
+    return nil
+})
+```
+
+### Wire format
+
+Same as TypeScript and Python — `{seq, chunk, done}` messages on `mesh.task.{task_id}.stream`.
+
+### Implementation
+
+```go
+type StreamChunk struct {
+    Seq    int                    `json:"seq"`
+    Chunk  map[string]interface{} `json:"chunk"`
+    Done   bool                   `json:"done"`
+    Result map[string]interface{} `json:"result,omitempty"`
+}
+
+type StreamResult struct {
+    chunks chan map[string]interface{}
+    result map[string]interface{}
+    err    error
+}
+
+func (sr *StreamResult) Chunks() <-chan map[string]interface{} {
+    return sr.chunks
+}
+
+func (sr *StreamResult) Result() map[string]interface{} {
+    return sr.result
+}
+
+func (am *Synapse) StreamRequest(agentID, skill string, input map[string]interface{}, timeout time.Duration) (*StreamResult, error) {
+    taskID := uuid.New().String()
+    streamSubject := fmt.Sprintf("mesh.task.%s.stream", taskID)
+
+    // Subscribe to stream before sending request
+    sub, err := am.nc.SubscribeSync(streamSubject)
+    if err != nil {
+        return nil, err
+    }
+
+    // Send the request
+    envelope := Envelope{
+        V: "1.0.0", ID: uuid.New().String(), Type: "request",
+        TS: time.Now().UTC().Format(time.RFC3339),
+        From: am.id, To: &agentID, TaskID: &taskID,
+        Trace: map[string]string{"trace_id": uuid.New().String(), "span_id": uuid.New().String()},
+        Payload: map[string]interface{}{"skill": skill, "input": input, "stream": true},
+    }
+
+    data, _ := json.Marshal(envelope)
+    subject := fmt.Sprintf("mesh.agent.%s.inbox", agentID)
+
+    if err := am.nc.Publish(subject, data); err != nil {
+        sub.Unsubscribe()
+        return nil, err
+    }
+
+    // Read chunks and send to channel
+    result := &StreamResult{
+        chunks: make(chan map[string]interface{}, 100),
+    }
+
+    go func() {
+        defer close(result.chunks)
+        defer sub.Unsubscribe()
+        deadline := time.After(timeout)
+
+        for {
+            select {
+            case <-deadline:
+                result.err = fmt.Errorf("stream timeout after %s", timeout)
+                return
+            default:
+            }
+
+            msg, err := sub.NextMsg(timeout)
+            if err != nil {
+                result.err = err
+                return
+            }
+
+            var chunk StreamChunk
+            if err := json.Unmarshal(msg.Data, &chunk); err != nil {
+                continue
+            }
+
+            if chunk.Done {
+                result.result = chunk.Result
+                return
+            }
+
+            result.chunks <- chunk.Chunk
+        }
+    }()
+
+    return result, nil
+}
+
+type StreamSendFunc func(chunk interface{}) error
+
+type StreamHandlerFunc func(payload map[string]interface{}, ctx map[string]string, send StreamSendFunc) error
+
+func (am *Synapse) OnStreamRequest(skill string, handler StreamHandlerFunc) {
+    // Wrap streaming handler as a regular handler that publishes chunks
+    am.OnRequest(skill, func(payload map[string]interface{}, ctx map[string]string) (interface{}, error) {
+        taskID := ctx["task_id"]
+        streamSubject := fmt.Sprintf("mesh.task.%s.stream", taskID)
+        seq := 0
+
+        send := func(chunk interface{}) error {
+            msg := map[string]interface{}{"seq": seq, "chunk": chunk, "done": false}
+            data, err := json.Marshal(msg)
+            if err != nil {
+                return err
+            }
+            seq++
+            return am.nc.Publish(streamSubject, data)
+        }
+
+        if err := handler(payload, ctx, send); err != nil {
+            return nil, err
+        }
+
+        // Send final stream message
+        finalMsg := map[string]interface{}{"seq": seq, "chunk": map[string]interface{}{}, "done": true}
+        data, _ := json.Marshal(finalMsg)
+        am.nc.Publish(streamSubject, data)
+
+        return map[string]interface{}{"status": "streamed", "chunks_sent": seq}, nil
+    })
+}
+```
+
+---
+
+## Schema Validation
+
+Validate envelopes and manifests using JSON Schema + `gojsonschema` to catch malformed messages before they propagate.
+
+### Install
+
+```bash
+go get github.com/xeipuuv/gojsonschema
+```
+
+### Usage
+
+```go
+import "github.com/your-org/synapse-go/synapse"
+
+// Validate an envelope before sending
+envelopeData, _ := json.Marshal(envelope)
+if err := synapse.ValidateEnvelope(envelopeData); err != nil {
+    log.Fatalf("Invalid envelope: %v", err)
+}
+
+// Validate a manifest at registration
+manifestData, _ := json.Marshal(manifest)
+if err := synapse.ValidateManifest(manifestData); err != nil {
+    log.Fatalf("Invalid manifest: %v", err)
+}
+```
+
+Full schema definitions and validator code are in [schema.md](./schema.md).
+
+---
+
+## OpenTelemetry Integration
+
+Wire up OTel tracing to track requests across agent hops.
+
+### Install
+
+```bash
+go get go.opentelemetry.io/otel go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc
+```
+
+### Quick Setup
+
+```go
+import "github.com/your-org/synapse-go/tracing"
+
+func main() {
+    // Initialize at startup
+    shutdown, err := tracing.InitTracing("my-agent", "localhost:4317")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer shutdown(context.Background())
+
+    // ... create mesh, register, etc.
+
+    // In a handler — create a SERVER span
+    mesh.OnRequest("chat", func(payload map[string]interface{}, ctx map[string]string) (interface{}, error) {
+        ctx, span := tracing.StartHandlerSpan(ctx, "chat", ctx["from"])
+        defer span.End()
+
+        result, err := handleChat(payload)
+        if err != nil {
+            span.RecordError(err)
+            return nil, err
+        }
+        return result, nil
+    })
+
+    // For outgoing requests — create a CLIENT span
+    ctx, span, traceCtx := tracing.StartRequestSpan(context.Background(), "chat", targetAgentID, nil)
+    start := time.Now()
+    result, err := mesh.Request(targetAgentID, "chat", input, 30*time.Second)
+    if err != nil {
+        span.RecordError(err)
+        span.End()
+        return
+    }
+    tracing.RecordRequest("chat", mesh.AgentID(), targetAgentID)
+    tracing.RecordLatency("chat", float64(time.Since(start).Milliseconds()))
+    span.End()
+}
+```
+
+Full tracing module, Grafana dashboard, and Docker Compose observability stack are in [observability.md](./observability.md).
+
+---
+
+## Backpressure & Flow Control
+
+Adaptive rate limiting, concurrency limits, and queue depth management to protect agents from overload.
+
+### Implementation
+
+```go
+// backpressure/backpressure.go
+package backpressure
+
+import (
+	"context"
+	"sync"
+	"time"
+)
+
+// ConcurrencyLimiter limits concurrent request handlers using a semaphore.
+type ConcurrencyLimiter struct {
+	sem       chan struct{}
+	active    int
+	pending   int
+	mu        sync.Mutex
+}
+
+func NewConcurrencyLimiter(maxConcurrency int) *ConcurrencyLimiter {
+	return &ConcurrencyLimiter{
+		sem: make(chan struct{}, maxConcurrency),
+	}
+}
+
+func (cl *ConcurrencyLimiter) Acquire(ctx context.Context) error {
+	cl.mu.Lock()
+	cl.pending++
+	cl.mu.Unlock()
+
+	select {
+	case cl.sem <- struct{}{}:
+		cl.mu.Lock()
+		cl.pending--
+		cl.active++
+		cl.mu.Unlock()
+		return nil
+	case <-ctx.Done():
+		cl.mu.Lock()
+		cl.pending--
+		cl.mu.Unlock()
+		return ctx.Err()
+	}
+}
+
+func (cl *ConcurrencyLimiter) Release() {
+	cl.mu.Lock()
+	cl.active--
+	cl.mu.Unlock()
+	<-cl.sem
+}
+
+func (cl *ConcurrencyLimiter) IsOverloaded() bool {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	return cl.pending > cap(cl.sem)*2
+}
+
+// AdaptiveRateLimiter implements token bucket with backoff on OVERLOADED.
+type AdaptiveRateLimiter struct {
+	maxTokens    int
+	minTokens    int
+	originalMax  int
+	bucket       float64
+	lastRefill   time.Time
+	refillMs     time.Duration
+	consecutiveOv int
+	mu           sync.Mutex
+}
+
+func NewAdaptiveRateLimiter(maxTokens, minTokens int, refillMs time.Duration) *AdaptiveRateLimiter {
+	return &AdaptiveRateLimiter{
+		maxTokens:   maxTokens,
+		minTokens:   minTokens,
+		originalMax: maxTokens,
+		bucket:      float64(maxTokens),
+		lastRefill:  time.Now(),
+		refillMs:    refillMs,
+	}
+}
+
+func (rl *AdaptiveRateLimiter) TryAcquire() bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	rl.refill()
+	if rl.bucket >= 1 {
+		rl.bucket--
+		return true
+	}
+	return false
+}
+
+func (rl *AdaptiveRateLimiter) OnOverload() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.consecutiveOv++
+	newMax := rl.maxTokens / (1 << rl.consecutiveOv)
+	if newMax < rl.minTokens {
+		newMax = rl.minTokens
+	}
+	rl.maxTokens = newMax
+	if rl.bucket > float64(newMax) {
+		rl.bucket = float64(newMax)
+	}
+}
+
+func (rl *AdaptiveRateLimiter) OnSuccess() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if rl.consecutiveOv > 0 {
+		rl.consecutiveOv--
+		newMax := rl.maxTokens * 2
+		if newMax > rl.originalMax {
+			newMax = rl.originalMax
+		}
+		rl.maxTokens = newMax
+	}
+}
+
+func (rl *AdaptiveRateLimiter) refill() {
+	now := time.Now()
+	elapsed := now.Sub(rl.lastRefill)
+	if elapsed >= rl.refillMs {
+		rl.bucket = float64(rl.maxTokens)
+		rl.lastRefill = now
+	}
+}
+```
+
+### Integration
+
+```go
+mesh.OnRequest("chat", func(payload map[string]interface{}, ctx map[string]string) (interface{}, error) {
+    // Check rate limit
+    if !rateLimiter.TryAcquire() {
+        return nil, fmt.Errorf("[4002] Rate limited")
+    }
+
+    // Acquire concurrency slot
+    if err := concurrency.Acquire(context.Background()); err != nil {
+        return nil, err
+    }
+    defer concurrency.Release()
+
+    // Handle the request
+    result, err := handleChat(payload)
+    if err != nil {
+        return nil, err
+    }
+    rateLimiter.OnSuccess()
+    return result, nil
+})
+
+// On receiving OVERLOADED from downstream:
+if err != nil && strings.Contains(err.Error(), "4001") {
+    rateLimiter.OnOverload()
+}
+```
+
+---
+
 **Continue to:**
 - [Full Go Examples](./examples/go/) — Complete projects
 - [JetStream Patterns](./patterns.md#jetstream) — Persistent messaging
 - [Security](./security.md) — NKeys and JWT authentication
+- [Schema Validation](./schema.md) — JSON Schema definitions
+- [Observability](./observability.md) — OTel tracing and dashboards

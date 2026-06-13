@@ -8,6 +8,7 @@
     "utilities": "tsx src/utilities-agent.ts",
     "claude": "tsx src/claude-agent.ts",
     "pipeline": "tsx src/document-pipeline.ts",
+    "orchestrator": "tsx src/orchestrator-agent.ts",
     "build": "tsc"
   },
   "dependencies": {

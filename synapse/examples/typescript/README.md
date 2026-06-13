@@ -1,93 +1,82 @@
-# Synapse TypeScript Complete Example
+# Synapse TypeScript Examples
 
-A fully working two-agent chat system using the Synapse protocol.
+Complete runnable Synapse agents in TypeScript.
 
-## Files
+## Prerequisites
 
-- `bob-agent.ts` — Agent that registers with a "chat" skill and responds to requests
-- `jeff-agent.ts` — Agent that discovers Bob and sends a test message
-- `synapse.ts` — The complete Synapse SDK (from typescript.md)
-- `package.json` — Dependencies
-- `tsconfig.json` — TypeScript config
+- Node.js 18+
+- NATS server running (`nats-server -js`)
+
+## Setup
+
+```bash
+npm install
+```
+
+## Agents
+
+| Agent | Description | Run |
+|-------|-------------|-----|
+| **Bob** | Chat responder (basic request/reply) | `npm run bob` |
+| **Jeff** | Discovers Bob and sends message | `npm run jeff` |
+| **Utilities** | 5 skills: uppercase, reverse, strlen, add, multiply | `npm run utilities` |
+| **Claude** | LLM-powered chat + summarize (needs `ANTHROPIC_API_KEY`) | `npm run claude` |
+| **Document Pipeline** | Event-driven document processing | `npm run pipeline` |
+| **Orchestrator** | Delegation chain: research → summarize | `npm run orchestrator` |
 
 ## Quick Start
 
 ```bash
-# 1. Install dependencies
-npm install
+# Terminal 1: Start NATS
+nats-server -js
 
-# 2. Start NATS server (separate terminal)
-nats-server
-
-# 3. Run Bob (separate terminal)
+# Terminal 2: Start Bob
 npm run bob
 
-# 4. Run Jeff (separate terminal)
+# Terminal 3: Send request from Jeff
 npm run jeff
 ```
 
-## What Happens
-
-1. **Bob starts**: Registers on the mesh with `chat` capability
-2. **Jeff starts**: Registers on the mesh, then runs `discover({ capabilities: ["chat"] })`
-3. **Discover finds Bob**: Jeff gets Bob's manifest including inbox subject
-4. **Jeff sends request**: `nats request mesh.agent.bob-001.inbox {...}`
-5. **Bob receives**: Handler function processes the request
-6. **Bob responds**: Returns `{ text: "Bob says: Got your message!" }`
-7. **Jeff logs**: Prints Bob's response and exits
-
-## Expected Output
-
-**Bob terminal:**
-```
-Connected to NATS at nats://localhost:4222 with ID: abc-123-...
-Agent "Bob's Agent" (abc-123-...) registered
-Handler "chat" registered
-Bob agent online, waiting for messages...
-[Bob] Received: "Hey Bob, how's it going?"
-```
-
-**Jeff terminal:**
-```
-Connected to NATS at nats://localhost:4222 with ID: xyz-456-...
-Agent "Jeff's Agent" (xyz-456-...) registered
-Jeff agent online, discovering Bob...
-Found Bob: Bob's Agent (abc-123-...)
-Bob's response: {"text":"Bob says: Got your message! You said \"Hey Bob, how's it going?\""}
-Agent xyz-456-... disconnected
-```
-
-## Docker Version
+## Multi-Skill Agent Test
 
 ```bash
-docker compose up --build
+# Start utilities agent
+npm run utilities
+
+# In another terminal, use nats CLI to test skills:
+nats request mesh.agent.<id>.inbox '{"skill":"reverse","input":{"text":"Hello"}}'
+nats request mesh.agent.<id>.inbox '{"skill":"add","input":{"a":7,"b":3}}'
 ```
 
-Starts NATS + Bob + Jeff in three containers, demonstrates full roundtrip.
+## Event Pipeline Test
 
-## Variations
+```bash
+# Start document pipeline
+npm run pipeline
 
-### Multi-Skill Version
-See `utilities-agent.ts` for an agent with 5 different skills routed via handler functions.
+# Publish a document event manually:
+nats pub mesh.event.document.uploaded '{"filename":"test.txt","path":"./sample.txt"}'
+```
 
-### LLM Version
-See `claude-agent.ts` to replace the canned chat response with a real Claude API call.
+## LLM Agent Test
 
-### Event Pipeline
-See `document-pipeline.ts` for a pub/sub-based processing pipeline.
+```bash
+ANTHROPIC_API_KEY=your-key npm run claude
 
-## Troubleshooting
+# From another agent:
+# mesh.request(claudeId, "chat", { message: "Explain quantum computing" })
+# mesh.request(claudeId, "summarize", { text: "long text here..." })
+```
 
-**Jeff can't find Bob:**
-- Both agents must connect to same NATS URL
-- Bob must be running before Jeff starts (or increase Jeff's discover timeout)
-- Check `nats server report subs` — should show `mesh.registry.discover` subscribers
+## Files
 
-**Request times out:**
-- Verify Bob's reply handler is registered: `nats server report subs | grep inbox`
-- Check Bob's logs for handler errors
-- Increase request timeout: `mesh.request(..., { timeout: 10000 })`
-
-## Next Steps
-
-Read the full [TypeScript SDK Guide](../../typescript.md) for production patterns, authentication, Docker deployment, and JetStream persistence.
+```
+src/
+  synapse.ts              — Complete Synapse SDK (copy this into your projects)
+  bob-agent.ts            — Basic chat agent
+  jeff-agent.ts           — Discover + request agent
+  utilities-agent.ts      — Multi-skill text/math agent
+  claude-agent.ts         — LLM-powered agent (Anthropic Claude)
+  document-pipeline.ts    — Event-driven document processor
+  orchestrator-agent.ts   — Delegation chain coordinator
+```

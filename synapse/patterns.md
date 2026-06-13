@@ -175,43 +175,47 @@ async function routeQuestion(mesh: Synapse, question: string, topic: string): Pr
 
 ---
 
-### 8. Streaming Responses
+## 8. Streaming Responses
 
 **Use when:** Agent is producing output incrementally (LLM tokens, large file processing).
 
-With NATS, use subject-based streaming:
+Synapse uses a `mesh.task.{task_id}.stream` subject for chunked responses.
+Each chunk is a separate NATS message with a sequence number. A final `done: true` signals completion.
+
+The SDK provides two methods:
 
 ```typescript
-// Producer: stream tokens on a sub-subject
-async function* streamResponse(mesh: Synapse, input: string): AsyncGenerator<string> {
-  const streamSubject = `mesh.stream.${uuid()}`;
-  
-  // Start streaming in background
-  setTimeout(async () => {
-    const tokens = await generateTokens(input);
-    for (const token of tokens) {
-      mesh.nc.publish(streamSubject, JSON.stringify({ token }));
-    }
-    mesh.nc.publish(streamSubject, JSON.stringify({ done: true }));
-  }, 0);
-
-  // Yield tokens as they arrive
-  return new Promise((resolve) => {
-    const sub = mesh.nc.subscribe(streamSubject);
-    const tokens: string[] = [];
-    
-    (async () => {
-      for await (const msg of sub) {
-        const data = JSON.parse(sc.decode(msg.data));
-        if (data.done) {
-          sub.unsubscribe();
-          break;
-        }
-        yield data.token;
-      }
-    })();
-  });
+// Caller side: returns an AsyncGenerator yielding chunks
+async for (const chunk of mesh.streamRequest(agentId, "analyze", { text: "large doc" })) {
+  console.log("Received chunk:", chunk);
 }
+
+// Handler side: registers a streaming handler
+mesh.onStreamRequest("analyze", async function* (payload) {
+  const text = payload.input?.text;
+  const words = text.split(/\s+/);
+  for (const word of words) {
+    yield { word };
+  }
+});
+```
+
+See full streaming primitive in your SDK:
+- [TypeScript streaming](./typescript.md#streaming-primitives)
+- [Python streaming](./python.md#streaming-primitives)
+- [Go streaming](./go.md#streaming-primitives)
+
+### Wire Protocol (Manual, without SDK helpers)
+
+If you're not using the SDK, the wire protocol is:
+
+```
+1. Caller sends request with task_id
+2. Handler publishes chunks to mesh.task.{task_id}.stream
+3. Each chunk: { seq: N, chunk: {...}, done: false }
+4. Final chunk: { seq: N+1, chunk: {...}, done: true }
+5. Caller subscribes to stream subject before sending request
+6. Caller yields chunks until done: true, then unsubscribes
 ```
 
 ---

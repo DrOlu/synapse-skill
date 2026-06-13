@@ -531,10 +531,17 @@ class Synapse:
         
         while True:
             try:
-                await self.emit("heartbeat.agent", {
-                    "agent_id": self.id,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
+                # Publish to mesh.heartbeat.{id} (consistent with TS/Go SDKs)
+                timestamp = datetime.now(timezone.utc).isoformat()
+                envelope = Envelope(
+                    type="heartbeat",
+                    from_agent=self.id,
+                    payload={"agent_id": self.id, "timestamp": timestamp},
+                )
+                await self.nc.publish(
+                    f"mesh.heartbeat.{self.id}",
+                    json.dumps(envelope.to_dict()).encode(),
+                )
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 break
@@ -1219,8 +1226,386 @@ docker-compose up -d
 
 ---
 
+## Schema Validation
+
+Validate envelopes and manifests using JSON Schema + `jsonschema` to catch malformed messages before they propagate.
+
+### Install
+
+```bash
+pip install jsonschema
+```
+
+### Usage
+
+```python
+from validate import validate_envelope, assert_envelope, validate_manifest, assert_manifest, SynapseValidationError
+
+# Validate and get errors
+errors = validate_envelope(incoming_data)
+if errors:
+    print("Invalid envelope:", errors)
+    # Respond with error code 2001 (INVALID_ENVELOPE)
+
+# Or assert (raises SynapseValidationError on invalid)
+try:
+    assert_envelope(outgoing_envelope_dict)
+    # Safe to send
+except SynapseValidationError as e:
+    print(f"Bug: tried to send invalid envelope: {e}")
+
+# Validate manifests at registration
+try:
+    assert_manifest(manifest_dict)
+except SynapseValidationError as e:
+    print(f"Bug: invalid manifest: {e}")
+```
+
+Full schema definitions and validator modules for all 3 SDKs are in [schema.md](./schema.md).
+
+---
+
+## OpenTelemetry Integration
+
+Wire up OTel tracing to track requests across agent hops.
+
+### Install
+
+```bash
+pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp
+```
+
+### Quick Setup
+
+```python
+from tracing import init_tracing, start_handler_span, start_request_span, record_request, record_latency
+
+# Initialize at startup
+init_tracing("my-agent", "http://localhost:4317")
+
+# In handler — create a SERVER span
+async def chat_handler(payload, context):
+    span = start_handler_span("chat", context["from"])
+    try:
+        result = {"text": f"Echo: {payload.get('input', {}).get('text', '')}"}
+        span.end()
+        return result
+    except Exception as e:
+        span.record_exception(e)
+        span.end()
+        raise
+
+# For outgoing requests — create a CLIENT span
+async def traced_request(mesh, agent_id, skill, input_data):
+    span, trace_ctx = start_request_span(skill, agent_id)
+    start = time.time()
+    try:
+        result = await mesh.request(agent_id, skill, input_data)
+        record_request(skill, mesh.id, agent_id)
+        record_latency(skill, (time.time() - start) * 1000)
+        span.end()
+        return result
+    except Exception as e:
+        span.record_exception(e)
+        span.end()
+        raise
+```
+
+Full tracing module, Grafana dashboard, and Docker Compose observability stack are in [observability.md](./observability.md).
+
+---
+
+## Streaming Primitives
+
+Synapse supports incremental responses via a stream subject per task.
+Each task gets its own subject: `mesh.task.{task_id}.stream`.
+Chunks are published as individual NATS messages; the final message has `done: true`.
+
+### Caller side: `stream_request()`
+
+Returns an async iterator yielding each chunk as it arrives.
+
+```python
+async for chunk in mesh.stream_request(agent_id, "analyze", {"text": "huge document"}):
+    # chunk is {"word": "lorem"}, {"word": "ipsum"}, etc.
+    print("chunk:", chunk)
+# loop exits when done: true arrives
+```
+
+### Handler side: `on_stream_request()`
+
+Registers an async generator handler that yields chunks.
+
+```python
+async def analyze_handler(payload, context):
+    text = payload.get("input", {}).get("text", "")
+    words = text.split()
+    for i, word in enumerate(words):
+        yield {"word": word, "index": i, "total": len(words)}
+
+mesh.on_stream_request("analyze", analyze_handler)
+```
+
+### LLM Streaming Example
+
+```python
+# Caller
+chunks = []
+async for chunk in mesh.stream_request(agent_id, "chat", {"message": "explain quantum"}):
+    chunks.append(chunk["token"])
+    print(chunk["token"], end="", flush=True)
+full_response = "".join(chunks)
+
+# Handler (using Anthropic SDK streaming)
+async def chat_stream_handler(payload, context):
+    message = payload.get("input", {}).get("message", "")
+    with anthropic.messages.stream(
+        model="claude-3-5-sonnet-20241022",
+        max_tokens=2000,
+        messages=[{"role": "user", "content": message}],
+    ) as stream:
+        for chunk in stream:
+            if hasattr(chunk, "delta") and hasattr(chunk.delta, "text"):
+                yield {"token": chunk.delta.text}
+
+mesh.on_stream_request("chat", chat_stream_handler)
+```
+
+### Wire format
+
+Each chunk message on `mesh.task.{task_id}.stream`:
+
+```json
+{
+  "seq": 0,
+  "chunk": { "token": "Hello" },
+  "done": false
+}
+```
+
+Final message:
+
+```json
+{
+  "seq": 4,
+  "chunk": { "token": "world" },
+  "done": true,
+  "result": { "full_text": "Hello world" }
+}
+```
+
+### Implementation
+
+```python
+# Add to Synapse class
+
+async def stream_request(
+    self,
+    agent_id: str,
+    skill: str,
+    input_data: Optional[Dict[str, Any]] = None,
+    timeout: float = 30.0,
+) -> "AsyncIterator[Dict[str, Any]]":
+    """Send a streaming request. Yields each chunk as it arrives."""
+    task_id = str(uuid.uuid4())
+    stream_subject = f"mesh.task.{task_id}.stream"
+
+    chunk_queue: asyncio.Queue = asyncio.Queue()
+
+    # Subscribe to stream before sending request
+    async def stream_listener(msg):
+        chunk = json.loads(msg.data.decode())
+        await chunk_queue.put(chunk)
+        if chunk.get("done"):
+            await chunk_queue.put(None)  # sentinel for shutdown
+
+    sub = await self.nc.subscribe(stream_subject, cb=stream_listener)
+
+    # Send the request
+    envelope = Envelope(
+        type="request",
+        from_agent=self.id,
+        to_agent=agent_id,
+        task_id=task_id,
+        trace={"trace_id": str(uuid.uuid4()), "span_id": str(uuid.uuid4())},
+        payload={"skill": skill, "input": input_data or {}, "stream": True},
+    )
+    await self.nc.publish(
+        f"mesh.agent.{agent_id}.inbox",
+        json.dumps(envelope.to_dict()).encode(),
+    )
+
+    # Yield chunks as they arrive, with timeout
+    deadline = asyncio.get_event_loop().time() + timeout
+    try:
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                raise TimeoutError(f"Stream timeout after {timeout}s")
+            chunk = await asyncio.wait_for(chunk_queue.get(), timeout=remaining)
+            if chunk is None:  # sentinel
+                break
+            if chunk.get("done"):
+                if chunk.get("result"):
+                    yield chunk["result"]
+                break
+            yield chunk.get("chunk", {})
+    finally:
+        await sub.unsubscribe()
+
+
+def on_stream_request(self, skill: str, generator_fn):
+    """Register an async generator handler for a streaming skill."""
+    async def wrapped_handler(payload, ctx):
+        task_id = ctx.get("task_id", str(uuid.uuid4()))
+        stream_subject = f"mesh.task.{task_id}.stream"
+        seq = 0
+
+        async for chunk in generator_fn(payload, ctx):
+            payload_msg = json.dumps({"seq": seq, "chunk": chunk, "done": False}).encode()
+            await self.nc.publish(stream_subject, payload_msg)
+            seq += 1
+
+        # Final stream message
+        final = json.dumps({"seq": seq, "chunk": {}, "done": True, "result": None}).encode()
+        await self.nc.publish(stream_subject, final)
+
+        # Return None since chunks were sent via stream
+        # The caller receives via stream, final response is just acknowledgment
+        return {"status": "streamed", "chunks_sent": seq}
+
+    self.on_request(skill, wrapped_handler)
+```
+
+---
+
+## Backpressure & Flow Control
+
+Adaptive rate limiting, concurrency limits, and queue depth management to protect agents from overload.
+
+### Implementation
+
+```python
+# backpressure.py
+import asyncio
+import time
+from typing import Optional
+
+
+class ConcurrencyLimiter:
+    """Limit concurrent request handlers."""
+    def __init__(self, max_concurrency: int = 10):
+        self.max_concurrency = max_concurrency
+        self.semaphore = asyncio.Semaphore(max_concurrency)
+        self._active = 0
+        self._pending = 0
+
+    async def acquire(self):
+        self._pending += 1
+        await self.semaphore.acquire()
+        self._pending -= 1
+        self._active += 1
+
+    def release(self):
+        self._active -= 1
+        self.semaphore.release()
+
+    @property
+    def active(self) -> int:
+        return self._active
+
+    @property
+    def pending(self) -> int:
+        return self._pending
+
+    @property
+    def is_overloaded(self) -> bool:
+        return self._pending > self.max_concurrency * 2
+
+
+class AdaptiveRateLimiter:
+    """Token bucket rate limiter that backs off on OVERLOADED (4001)."""
+    def __init__(self, max_tokens: int = 50, refill_ms: int = 1000, min_tokens: int = 5):
+        self.max_tokens = max_tokens
+        self.min_tokens = min_tokens
+        self.original_max = max_tokens
+        self.token_bucket = float(max_tokens)
+        self.last_refill = time.monotonic()
+        self.refill_ms = refill_ms / 1000.0
+        self._consecutive_overloads = 0
+
+    def try_acquire(self) -> bool:
+        self._refill()
+        if self.token_bucket >= 1:
+            self.token_bucket -= 1
+            return True
+        return False
+
+    async def acquire(self):
+        while not self.try_acquire():
+            await asyncio.sleep(0.05)
+
+    def on_overload(self):
+        """Call when downstream returns OVERLOADED (4001)."""
+        self._consecutive_overloads += 1
+        self.max_tokens = max(
+            self.min_tokens,
+            int(self.max_tokens / (2 ** self._consecutive_overloads))
+        )
+        self.token_bucket = min(self.token_bucket, self.max_tokens)
+
+    def on_success(self):
+        """Call when a request succeeds."""
+        if self._consecutive_overloads > 0:
+            self._consecutive_overloads -= 1
+            self.max_tokens = min(self.max_tokens * 2, self.original_max)
+
+    def _refill(self):
+        now = time.monotonic()
+        elapsed = now - self.last_refill
+        if elapsed >= self.refill_ms:
+            self.token_bucket = min(self.max_tokens, self.token_bucket + self.max_tokens)
+            self.last_refill = now
+```
+
+### Integration
+
+```python
+from backpressure import ConcurrencyLimiter, AdaptiveRateLimiter
+from synapse import Synapse
+
+class ProtectedSynapse(Synapse):
+    def __init__(self, nc):
+        super().__init__(nc)
+        self._concurrency = ConcurrencyLimiter(10)
+        self._rate_limiter = AdaptiveRateLimiter(50)
+
+    def on_request(self, skill: str, handler):
+        async def protected_handler(payload, context):
+            if not self._rate_limiter.try_acquire():
+                raise Exception("[4002] Rate limited")
+
+            await self._concurrency.acquire()
+            try:
+                result = await handler(payload, context) if asyncio.iscoroutinefunction(handler) else handler(payload, context)
+                self._rate_limiter.on_success()
+                return result
+            except Exception as e:
+                if "4001" in str(e):
+                    self._rate_limiter.on_overload()
+                raise
+            finally:
+                self._concurrency.release()
+
+        super().on_request(skill, protected_handler)
+```
+
+---
+
 ## Next Steps
 
 - [Complete Examples](./examples/python/) — Full runnable projects
 - [Patterns Guide](./patterns.md) — Advanced patterns
 - [Security](./security.md) — Authentication and multi-tenant
+- [Schema Validation](./schema.md) — JSON Schema definitions
+- [Observability](./observability.md) — OTel tracing and dashboards

@@ -15,16 +15,16 @@ Complete setup demonstrating Synapse working across two organizations behind fir
 ## Files
 
 ```
-setup.sh              # Generate NKeys, accounts, credentials
-docker-compose.yml    # 3 containers: acme, globex, cloud-hub
-test.sh               # Send cross-org request
+docker-compose.yml              # 4 containers: cloud-hub, acme-nats, globex-nats, agents
 configs/
-  cloud-hub.conf      # Cloud NATS configuration
-  acme-internal.conf  # Acme's internal NATS
-  globex-internal.conf
-creds/                # Generated credentials (gitignored)
-  acme/
-  globex/
+  cloud-hub.conf               # Cloud NATS configuration (accounts, leaf node listener)
+  acme-internal.conf            # Acme's internal NATS (leaf to cloud hub)
+  globex-internal.conf         # Globex's internal NATS (leaf to cloud hub)
+creds/
+  acme/leafnode.creds           # Acme leaf node credentials
+  globex/leafnode.creds         # Globex leaf node credentials
+setup.sh                        # Generate credentials
+test.sh                         # Run cross-org tests
 ```
 
 ## Setup (First Time)
@@ -36,8 +36,11 @@ creds/                # Generated credentials (gitignored)
 # 2. Start all containers
 docker compose up -d
 
-# 3. Verify leaf node connections
-docker compose exec cloud-hub nats server report leafnats
+# 3. Wait for servers to be ready (10s)
+sleep 10
+
+# 4. Verify leaf node connections
+curl -s http://localhost:8222/leafz | python3 -m json.tool
 # Should show: 2 leaf nodes (Acme + Globex)
 ```
 
@@ -48,18 +51,51 @@ docker compose exec cloud-hub nats server report leafnats
 ```
 
 This script:
-1. Registers Acme's code review agent
-2. From inside Globex network, discovers Acme's agent
-3. Sends a code review request across organizations
-4. Prints Acme's response
+1. Registers Acme's code review agent on Acme's internal NATS
+2. Starts a responder on Acme's inbox
+3. From Globex's network, discovers Acme's agent
+4. Sends a code review request across organizations
+5. Publishes a shared event from Acme → Globex
+6. Prints results for each step
+
+## Manual Testing
+
+```bash
+# Register Acme agent (from Acme network)
+nats pub mesh.registry.register '{"id":"acme-001","name":"Acme Code Review","capabilities":["code.review"]}' -s nats://localhost:5222
+
+# Discover from Globex network
+nats request mesh.registry.discover '{"capabilities":["code.review"]}' -s nats://localhost:6222
+
+# Publish shared event from Acme
+nats pub mesh.event.shared.acme.deployed '{"service":"api","version":"1.0"}' -s nats://localhost:5222
+
+# Subscribe to Acme events from Globex
+nats sub mesh.event.shared.acme.> -s nats://localhost:6222
+```
+
+## Monitoring
+
+```bash
+# Cloud hub monitoring
+curl http://localhost:8222/varz | python3 -m json.tool    # Server info
+curl http://localhost:8222/leafz | python3 -m json.tool   # Leaf nodes
+curl http://localhost:8222/connz | python3 -m json.tool   # Connections
+
+# Acme monitoring
+curl http://localhost:5822/varz | python3 -m json.tool
+
+# Globex monitoring
+curl http://localhost:6822/varz | python3 -m json.tool
+```
 
 ## What's Happening Under the Hood
 
-1. **Isolation**: Acme agents connect to Acme's internal NATS. Globex agents to Globex's internal NATS. They never see each other's internal traffic.
+1. **Isolation**: Acme agents connect to Acme's internal NATS (port 5222). Globex agents to Globex's internal NATS (port 6222). They never see each other's internal traffic.
 
-2. **Selective Sharing**: Only `mesh.event.shared.>` crosses organizations (explicitly imported in each account).
+2. **Selective Sharing**: Only `mesh.event.shared.>` and `mesh.agent.{org}.>` cross organizations (explicitly imported/exported in each account).
 
-3. **Outbound Only**: Both leaf nodes connect OUTBOUND to cloud hub. No inbound ports required. No firewall changes.
+3. **Outbound Only**: Both leaf nodes connect OUTBOUND to cloud hub on port 7422. No inbound ports required. No firewall changes.
 
 4. **Persistent Connections**: If connection drops, NATS auto-reconnects when network recovers. No message loss with JetStream.
 
@@ -76,29 +112,6 @@ rm -rf creds/
 - **Acme Internal**: Existing infrastructure
 - **Globex Internal**: Existing infrastructure
 - **Total incremental cost**: $0–$5/month
-
-## Troubleshooting
-
-**Leaf node won't connect:**
-```bash
-# Check cloud hub logs
-docker compose logs cloud-hub
-
-# Verify firewall allows outbound TCP 7422
-docker compose exec acme-nats nc -zv cloud-hub 7422
-```
-
-**Agent can't discover cross-org:**
-```bash
-# Both agents must use the same registry (connected via leaf nodes)
-# Check leaf status
-docker compose exec cloud-hub nats server report leafnats
-```
-
-**TLS errors:**
-- Ensure CA cert is same on all three servers
-- Check certificate expiry dates
-- Verify hostname matches cert SAN
 
 ## Next Steps
 

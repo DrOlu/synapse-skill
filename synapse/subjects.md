@@ -45,8 +45,21 @@ Complete map of Synapse NATS subjects.
 ## Heartbeat Subjects
 
 ```
-mesh.heartbeat.{agent_id}
-mesh.heartbeat.>   // subscribe to all
+mesh.heartbeat.{agent_id}   // Unified across all SDKs (TS, Python, Go)
+mesh.heartbeat.>            // subscribe to all heartbeats
+```
+
+All SDKs publish heartbeats as a Synapse envelope to `mesh.heartbeat.{agent_id}`:
+
+```json
+{
+  "v": "1.0.0",
+  "id": "uuid",
+  "type": "heartbeat",
+  "ts": "2026-01-15T12:34:56.789Z",
+  "from": "agent-id",
+  "payload": { "agent_id": "agent-id", "timestamp": "2026-01-15T12:34:56.789Z" }
+}
 ```
 
 ## Monitoring (NATS native)

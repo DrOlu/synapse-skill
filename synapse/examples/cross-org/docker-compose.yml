@@ -1,0 +1,80 @@
+version: "3.8"
+
+services:
+  # ─── Cloud Hub (neutral ground) ─────────────────────────────
+  cloud-hub:
+    image: nats:2.11-alpine
+    container_name: cloud-hub
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+      - "7422:7422"
+    volumes:
+      - ./configs/cloud-hub.conf:/etc/nats/nats.conf
+    command: ["-c", "/etc/nats/nats.conf"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─── Acme Internal NATS Server ──────────────────────────────
+  acme-nats:
+    image: nats:2.11-alpine
+    container_name: acme-nats
+    ports:
+      - "5222:4222"
+      - "5822:8222"
+    volumes:
+      - ./configs/acme-internal.conf:/etc/nats/nats.conf
+      - ./creds:/etc/nats/creds
+    command: ["-c", "/etc/nats/nats.conf"]
+    restart: unless-stopped
+    depends_on:
+      cloud-hub:
+        condition: service_healthy
+
+  # ─── Globex Internal NATS Server ────────────────────────────
+  globex-nats:
+    image: nats:2.11-alpine
+    container_name: globex-nats
+    ports:
+      - "6222:4222"
+      - "6822:8222"
+    volumes:
+      - ./configs/globex-internal.conf:/etc/nats/nats.conf
+      - ./creds:/etc/nats/creds
+    command: ["-c", "/etc/nats/nats.conf"]
+    restart: unless-stopped
+    depends_on:
+      cloud-hub:
+        condition: service_healthy
+
+  # ─── Acme Code Review Agent ─────────────────────────────────
+  acme-agent:
+    build:
+      context: ../docker
+      dockerfile: Dockerfile
+    container_name: acme-code-review
+    depends_on:
+      - acme-nats
+    environment:
+      NATS_URL: nats://acme-nats:4222
+      AGENT_NAME: acme-code-review
+    command: ["node", "dist/bob-agent.js"]
+    restart: unless-stopped
+
+  # ─── Globex Security Review Agent ──────────────────────────
+  globex-agent:
+    build:
+      context: ../docker
+      dockerfile: Dockerfile
+    container_name: globex-security-review
+    depends_on:
+      - globex-nats
+    environment:
+      NATS_URL: nats://globex-nats:4222
+      AGENT_NAME: globex-security-review
+    command: ["node", "dist/bob-agent.js"]
+    restart: unless-stopped
