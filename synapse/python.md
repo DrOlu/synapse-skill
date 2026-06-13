@@ -117,8 +117,8 @@ class Envelope:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     type: str = "message"
     ts: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    from_agent: str = ""
-    to_agent: Optional[str] = None
+    from_agent: str = ""  # Serialized as "from" in JSON (Python keyword)
+    to_agent: Optional[str] = None  # Serialized as "to" in JSON (Python keyword)
     task_id: Optional[str] = None
     trace: Optional[Dict[str, str]] = None
     payload: Optional[Any] = None
@@ -204,9 +204,13 @@ class Synapse:
         capabilities: Optional[List[str]] = None,
         skills: Optional[List[Dict[str, str]]] = None,
         heartbeat_interval: int = 30,
+        id: Optional[str] = None,
     ) -> AgentManifest:
         """Register agent with capabilities and skills"""
         
+        # Allow caller to specify a stable agent ID (e.g., for HTTP bridge proxying)
+        if id is not None:
+            self.id = id
         self.manifest = AgentManifest(
             id=self.id,
             name=name,
@@ -249,6 +253,7 @@ class Synapse:
         """Discover agents by capability"""
         
         agents = []
+        seen = set()  # Deduplicate by agent ID
         inbox = self.nc.new_inbox()
         
         fut = asyncio.Future()
@@ -257,9 +262,13 @@ class Synapse:
             try:
                 envelope = Envelope.from_dict(json.loads(msg.data.decode()))
                 if envelope.payload and isinstance(envelope.payload, dict):
+                    agent_id = envelope.payload.get("id", "unknown")
+                    if agent_id in seen:
+                        return  # Skip duplicate
+                    seen.add(agent_id)
                     agents.append(
                         AgentManifest(
-                            id=envelope.payload.get("id", "unknown"),
+                            id=agent_id,
                             name=envelope.payload.get("name", "unknown"),
                             description=envelope.payload.get("description", ""),
                             capabilities=envelope.payload.get("capabilities", []),

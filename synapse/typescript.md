@@ -223,7 +223,12 @@ export class Synapse {
     description?: string;
     capabilities?: string[];
     skills?: Skill[];
+    id?: string;
   }): Promise<AgentManifest> {
+    // Allow caller to specify a stable agent ID (e.g., for HTTP bridge proxying)
+    if (options.id) {
+      this.id = options.id;
+    }
     this.manifest = {
       id: this.id,
       name: options.name,
@@ -588,11 +593,21 @@ export class Synapse {
   private _startHeartbeat(intervalMs: number = 30000): void {
     this.heartbeatInterval = setInterval(() => {
       if (this.manifest) {
-        // Publish the ISO timestamp directly to mesh.heartbeat.<id>
-        // (not wrapped in an event envelope — listeners do a plain string check)
+        // Publish heartbeat envelope (consistent with Python/Go SDKs)
+        const heartbeat: Envelope = {
+          v: "1.0.0",
+          id: uuid(),
+          type: "heartbeat",
+          ts: new Date().toISOString(),
+          from: this.id,
+          payload: {
+            agent_id: this.id,
+            timestamp: new Date().toISOString(),
+          },
+        };
         this.nc.publish(
           `mesh.heartbeat.${this.id}`,
-          sc.encode(new Date().toISOString())
+          jc.encode(heartbeat)
         );
       }
     }, intervalMs);
@@ -1282,7 +1297,11 @@ export class Synapse {
 
   // ---- register ----
 
-  async register({ name, description, capabilities = [], skills = [] }) {
+  async register({ name, description, capabilities = [], skills = [], id }) {
+    // Allow caller to specify a stable agent ID (e.g., for HTTP bridge proxying)
+    if (id) {
+      this.#id = id;
+    }
     this.#manifest = {
       id: this.#id,
       name,
@@ -1518,9 +1537,15 @@ export class Synapse {
   #startHeartbeat(intervalMs = 30000) {
     this.#heartbeatInterval = setInterval(() => {
       if (this.#manifest) {
+        // Publish heartbeat envelope (consistent with Python/Go SDKs)
+        const heartbeat = {
+          v: "1.0.0", id: uuid(), type: "heartbeat",
+          ts: new Date().toISOString(), from: this.#id,
+          payload: { agent_id: this.#id, timestamp: new Date().toISOString() },
+        };
         this.#nc.publish(
           `mesh.heartbeat.${this.#id}`,
-          sc.encode(new Date().toISOString())
+          jc.encode(heartbeat)
         );
       }
     }, intervalMs);
@@ -1766,6 +1791,12 @@ async *streamRequest(
     payload: { skill, input, stream: true },
   };
   this.nc.publish(`mesh.agent.${agentId}.inbox`, jc.encode(envelope), { reply: inbox });
+
+  // Note: stream subjects have no built-in backpressure. If the handler
+  // produces chunks faster than the caller consumes them, messages
+  // accumulate on the stream subject. For production use, consider
+  // JetStream with consumer rate limits or implement windowed flow control
+  // (e.g., caller publishes ack on mesh.task.{task_id}.ack every N chunks).
 
   // Yield chunks as they arrive
   let seq = 0;

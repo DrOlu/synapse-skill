@@ -111,9 +111,10 @@ export class HTTPBridge {
   async registerAgent(config: HTTPAgentConfig): Promise<void> {
     this.agents.set(config.id, config);
 
-    // Register on behalf of the HTTP agent
-    // We use a proxy pattern: the bridge responds, but announces as the HTTP agent
+    // Register on behalf of the HTTP agent using the configured ID
+    // so that other agents can discover and address it by the same ID
     await this.mesh.register({
+      id: config.id,
       name: config.name,
       capabilities: config.capabilities,
       skills: config.skills,
@@ -350,7 +351,9 @@ class HTTPBridge:
         self.agents[config.id] = config
 
         # Register the bridge as a proxy for this HTTP agent
+        # Use the configured ID so other agents can discover and address it
         await self.mesh.register(
+            id=config.id,
             name=config.name,
             capabilities=config.capabilities,
             skills=config.skills,

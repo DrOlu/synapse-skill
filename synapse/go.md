@@ -124,9 +124,13 @@ func (am *Synapse) AgentID() string {
 }
 
 // PRIMITIVE 1: Register
-func (am *Synapse) Register(name, description string, capabilities []string, skills []Skill) error {
-    am.manifest = &AgentManifest{
-        ID:            am.id,
+func (am *Synapse) Register(name, description string, capabilities []string, skills []Skill, optID ...string) error {
+	// Allow caller to specify a stable agent ID (e.g., for HTTP bridge proxying)
+	if len(optID) > 0 {
+		am.id = optID[0]
+	}
+	am.manifest = &AgentManifest{
+		ID:            am.id,
         Name:          name,
         Description:   description,
         Capabilities:  capabilities,
@@ -291,10 +295,36 @@ func (am *Synapse) Subscribe(pattern string, handler func(payload map[string]int
     return err
 }
 
-// Close
+// Deregister removes this agent from the mesh registry.
+func (am *Synapse) Deregister() error {
+	if am.manifest == nil {
+		return nil
+	}
+
+	envelope := Envelope{
+		V:       "1.0.0",
+		ID:      uuid.New().String(),
+		Type:    "deregister",
+		TS:      time.Now().UTC().Format(time.RFC3339),
+		From:    am.id,
+		Payload: map[string]interface{}{"id": am.id},
+	}
+
+	data, _ := json.Marshal(envelope)
+	if err := am.nc.Publish("mesh.registry.deregister", data); err != nil {
+		return fmt.Errorf("publish deregister: %w", err)
+	}
+
+	am.manifest = nil
+	log.Printf("Agent %s deregistered", am.id)
+	return nil
+}
+
+// Close gracefully disconnects, publishing deregister before draining.
 func (am *Synapse) Close() error {
-    am.cancel()
-    return am.nc.Drain()
+	am.cancel()
+	_ = am.Deregister() // best-effort deregister before drain
+	return am.nc.Drain()
 }
 
 // Internal helpers
@@ -426,8 +456,8 @@ func (am *Synapse) setupRequestHandler() error {
             return
         }
 
-        outputMap, _ := result.(map[string]interface{})
-        
+        // Use result directly — type assertion to map[string]interface{} silently
+        // drops non-map results (strings, arrays, numbers, nil).
         response := Envelope{
             V:      "1.0.0",
             ID:     uuid.New().String(),
@@ -438,7 +468,7 @@ func (am *Synapse) setupRequestHandler() error {
             TaskID: envelope.TaskID,
             Trace:  envelope.Trace,
             Payload: map[string]interface{}{
-                "output": outputMap,
+                "output": result,
             },
         }
 

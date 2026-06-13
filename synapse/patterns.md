@@ -301,7 +301,10 @@ Subscribe to all heartbeats and track agent liveness:
 const agentStatus = new Map<string, { lastSeen: Date; available: boolean }>();
 
 mesh.subscribe("heartbeat.>", (payload) => {
-  agentStatus.set(payload.data.agent_id, {
+  // Heartbeat payload is { event_type, data: { agent_id, timestamp } }
+  const agentId = payload.data?.agent_id || payload.agent_id;
+  if (!agentId) return;
+  agentStatus.set(agentId, {
     lastSeen: new Date(),
     available: true,
   });

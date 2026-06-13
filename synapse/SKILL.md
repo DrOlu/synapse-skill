@@ -229,7 +229,7 @@ Before going to production, verify:
 - [ ] OTLP endpoint is configured for trace/metric export
 - [ ] Circuit breakers protect overloaded agents (see [patterns.md](./patterns.md))
 - [ ] Backpressure / flow control enabled (concurrency limits, adaptive rate limiting)
-- [ ] Heartbeats use consistent format across all SDKs (`mesh.heartbeat.{id}` with envelope)
+- [ ] Heartbeats use consistent format across all SDKs (`mesh.heartbeat.{id}` with envelope containing `{ v, id, type: "heartbeat", ts, from, payload: { agent_id, timestamp } }`)
 
 ## Troubleshooting
 

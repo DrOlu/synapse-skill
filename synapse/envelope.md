@@ -62,14 +62,16 @@ Complete specification for Synapse message envelopes.
 ## Retry Strategy
 
 ```typescript
-async function retryWithBackoff(fn, maxRetries = 5, baseDelay = 100) {
-  for (let i = 0; i < maxRetries; i++) {
+async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 100) {
+  for (let i = 0; i <= maxRetries; i++) {
     try {
       return await fn();
     } catch (err) {
       if (!err.retryable) throw err;
-      const delay = baseDelay * Math.pow(2, i);
-      await new Promise(r => setTimeout(r, delay));
+      if (i < maxRetries) {
+        const delay = baseDelay * Math.pow(2, i);
+        await new Promise(r => setTimeout(r, delay));
+      }
     }
   }
   throw new Error("Max retries exceeded");
