@@ -197,6 +197,7 @@ All agents speak Synapse: servers via TCP, browsers via WebSocket, HTTP services
 | Cross-org coordination (firewalls) | [Cross-Org Guide](./cross-org.md) |
 | Need guaranteed delivery | JetStream (Go SDK) |
 | Need streaming responses (LLM tokens) | [Streaming Primitives](./typescript.md#streaming-primitives) — `streamRequest()` / `onStreamRequest()` |
+| Agent takes >30s to respond (API calls, multi-step reasoning) | [Long-Running Requests](./typescript.md#long-running-requests) — increase `timeoutMs`, use `streamRequest()`, or stable reply subject for CLI |
 | Need conversation history / task persistence | [Task Store](./tasks.md) — JetStream-backed task lifecycle + multi-turn linking |
 | Want observability/debugging | [Observability Guide](./observability.md) — OTel tracing, metrics, Grafana |
 | Need message validation | [Schema Guide](./schema.md) — JSON Schema for all message types |
@@ -252,6 +253,12 @@ nats sub mesh.registry.register -s nats://localhost:4222 --count 1
 - Leaf nodes must connect OUTBOUND only
 - Check firewall allows NATS port (4222 default)
 - Use `nats auth info` to verify JWT is valid
+
+**Request times out on long-running agents (LLM, API calls, multi-step reasoning):**
+- Pass explicit `timeoutMs` to `request()`: `mesh.request(id, skill, input, 180_000)`
+- For agents taking >3 min, use `streamRequest()` / `onStreamRequest()` instead
+- From CLI: subscribe to a stable reply subject BEFORE publishing the request (not after)
+- See [Long-Running Requests](./typescript.md#long-running-requests) for full patterns
 
 See [setup.md#troubleshooting](./setup.md#troubleshooting) for full troubleshooting guide.
 

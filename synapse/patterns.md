@@ -177,28 +177,42 @@ async function routeQuestion(mesh: Synapse, question: string, topic: string): Pr
 
 ## 8. Streaming Responses
 
-**Use when:** Agent is producing output incrementally (LLM tokens, large file processing).
+**Use when:** Agent is producing output incrementally (LLM tokens, large file processing, multi-step reasoning), OR when the agent takes more than ~30 seconds to respond.
 
-Synapse uses a `mesh.task.{task_id}.stream` subject for chunked responses.
-Each chunk is a separate NATS message with a sequence number. A final `done: true` signals completion.
+Synapse uses a dedicated `mesh.task.{task_id}.stream` subject per task.
+Each chunk is a separate NATS message. A final `{ done: true }` signals completion.
 
-The SDK provides two methods:
+> **Key rule:** Always subscribe to the stream subject **before** publishing the request. If you subscribe after, you may miss early chunks published by a fast handler.
+
+### SDK usage
 
 ```typescript
 // Caller side: returns an AsyncGenerator yielding chunks
-async for (const chunk of mesh.streamRequest(agentId, "analyze", { text: "large doc" })) {
-  console.log("Received chunk:", chunk);
+for await (const chunk of mesh.streamRequest(agentId, "analyze", { text: "large doc" })) {
+  process.stdout.write(chunk.token ?? ""); // live output
 }
+// Loop exits automatically when done: true arrives
 
 // Handler side: registers a streaming handler
 mesh.onStreamRequest("analyze", async function* (payload) {
-  const text = payload.input?.text;
+  const text = payload.input?.text ?? "";
   const words = text.split(/\s+/);
   for (const word of words) {
-    yield { word };
+    yield { word }; // each yield → one NATS message on stream subject
   }
 });
 ```
+
+### When to use streaming vs regular request
+
+| Agent response time | Use |
+|---|---|
+| < 30s | `request()` with default timeout |
+| 30s – 3min | `request()` with explicit `timeoutMs` e.g. `180_000` |
+| > 3min or LLM tokens | `streamRequest()` — always safe even for fast responses |
+| CLI / no SDK | Stable reply subject (subscribe first, then publish) |
+
+See [Long-Running Requests](./typescript.md#long-running-requests) for full patterns including the CLI stable-reply-subject workaround.
 
 See full streaming primitive in your SDK:
 - [TypeScript streaming](./typescript.md#streaming-primitives)
@@ -210,11 +224,11 @@ See full streaming primitive in your SDK:
 If you're not using the SDK, the wire protocol is:
 
 ```
-1. Caller sends request with task_id
-2. Handler publishes chunks to mesh.task.{task_id}.stream
-3. Each chunk: { seq: N, chunk: {...}, done: false }
-4. Final chunk: { seq: N+1, chunk: {...}, done: true }
-5. Caller subscribes to stream subject before sending request
+1. Caller SUBSCRIBES to mesh.task.{task_id}.stream  ← do this FIRST
+2. Caller sends request with task_id and payload.stream=true
+3. Handler publishes chunks to mesh.task.{task_id}.stream
+4. Each chunk: { seq: N, chunk: {...}, done: false }
+5. Final chunk: { seq: N+1, chunk: {}, done: true, result?: {...} }
 6. Caller yields chunks until done: true, then unsubscribes
 ```
 

@@ -179,6 +179,7 @@ export class Synapse {
   private id: string;
   private manifest: AgentManifest | null = null;
   private handlers: Map<string, (...args: any[]) => any> = new Map();
+  private streamHandlers: Map<string, (payload: any, ctx: { task_id: string; from: string }) => AsyncGenerator<any>> = new Map();
   private heartbeatInterval?: NodeJS.Timeout;
 
   private constructor(nc: NatsConnection) {
@@ -523,6 +524,28 @@ export class Synapse {
         const handler = this.handlers.get(skill);
 
         if (handler) {
+          // Check if this is a streaming request
+          if (envelope.payload?.stream && this.streamHandlers.has(skill)) {
+            const streamHandler = this.streamHandlers.get(skill)!;
+            const streamSubject = `mesh.task.${envelope.task_id}.stream`;
+            let seq = 0;
+            try {
+              for await (const chunk of streamHandler(envelope.payload, {
+                task_id: envelope.task_id || "",
+                from: envelope.from,
+              })) {
+                this.nc.publish(streamSubject, jc.encode({ seq: seq++, chunk, done: false }));
+              }
+              this.nc.publish(streamSubject, jc.encode({ seq: seq++, chunk: {}, done: true }));
+            } catch (error: any) {
+              this.nc.publish(streamSubject, jc.encode({
+                seq: seq++, chunk: {}, done: true,
+                error: { code: 5001, message: error.message, retryable: true }
+              }));
+            }
+            continue; // don't fall through to regular handler
+          }
+
           try {
             const result = await handler(envelope.payload, {
               task_id: envelope.task_id || "",
@@ -1271,6 +1294,7 @@ export class Synapse {
   #id;
   #manifest = null;
   #handlers = new Map();
+  #streamHandlers = new Map();
   #heartbeatInterval;
 
   constructor(nc) {
@@ -1511,6 +1535,29 @@ export class Synapse {
           ...extra,
         });
 
+        // Handle streaming requests
+        if (envelope.payload?.stream && this.#streamHandlers.has(skill)) {
+          const streamHandler = this.#streamHandlers.get(skill);
+          const streamSubject = `mesh.task.${envelope.task_id}.stream`;
+          let seq = 0;
+          (async () => {
+            try {
+              for await (const chunk of streamHandler(envelope.payload, {
+                task_id: envelope.task_id || "", from: envelope.from,
+              })) {
+                this.#nc.publish(streamSubject, jc.encode({ seq: seq++, chunk, done: false }));
+              }
+              this.#nc.publish(streamSubject, jc.encode({ seq: seq++, chunk: {}, done: true }));
+            } catch (err) {
+              this.#nc.publish(streamSubject, jc.encode({
+                seq: seq++, chunk: {}, done: true,
+                error: { code: 5001, message: err.message, retryable: true }
+              }));
+            }
+          })();
+          continue;
+        }
+
         if (!msg.reply) continue;
 
         if (handler) {
@@ -1549,6 +1596,49 @@ export class Synapse {
         );
       }
     }, intervalMs);
+  }
+
+  // ---- streamRequest (caller) ----
+
+  async *streamRequest(agentId, skill, input, timeoutMs = 120000) {
+    const taskId = uuid();
+    const streamSubject = `mesh.task.${taskId}.stream`;
+    const inbox = createInbox();
+
+    // Subscribe BEFORE publishing to avoid missing early chunks
+    const streamSub = this.#nc.subscribe(streamSubject);
+
+    this.#nc.publish(`mesh.agent.${agentId}.inbox`, jc.encode({
+      v: "1.0.0", id: uuid(), type: "request",
+      ts: new Date().toISOString(), from: this.#id, to: agentId,
+      task_id: taskId,
+      trace: { trace_id: uuid(), span_id: uuid() },
+      payload: { skill, input, stream: true },
+    }), { reply: inbox });
+
+    const timer = setTimeout(() => streamSub.unsubscribe(), timeoutMs);
+
+    try {
+      for await (const msg of streamSub) {
+        const chunk = jc.decode(msg.data);
+        if (chunk.done) {
+          streamSub.unsubscribe();
+          clearTimeout(timer);
+          if (chunk.result) yield chunk.result;
+          return;
+        }
+        yield chunk.chunk;
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // ---- onStreamRequest (handler) ----
+
+  onStreamRequest(skill, handler) {
+    this.#streamHandlers.set(skill, handler);
+    console.log(`Stream handler "${skill}" registered`);
   }
 }
 
@@ -1768,21 +1858,22 @@ Final message:
 ### Implementation details
 
 ```typescript
-// streamRequest - caller side
+// streamRequest — caller side (add to Synapse class)
 async *streamRequest(
   agentId: string,
   skill: string,
   input: any,
-  timeoutMs: number = 30000
+  timeoutMs: number = 120000  // default 120s for long-running agents
 ): AsyncGenerator<any> {
   const taskId = uuid();
   const streamSubject = `mesh.task.${taskId}.stream`;
   const inbox = createInbox();
 
-  // Subscribe to stream before sending request
-  const sub = this.nc.subscribe(streamSubject);
+  // IMPORTANT: subscribe to stream BEFORE sending request
+  // This avoids the race where the handler starts publishing
+  // before the caller has subscribed.
+  const streamSub = this.nc.subscribe(streamSubject);
 
-  // Send the request
   const envelope: Envelope = {
     v: "1.0.0", id: uuid(), type: "request",
     ts: new Date().toISOString(), from: this.id, to: agentId,
@@ -1790,36 +1881,20 @@ async *streamRequest(
     trace: { trace_id: uuid(), span_id: uuid() },
     payload: { skill, input, stream: true },
   };
+
   this.nc.publish(`mesh.agent.${agentId}.inbox`, jc.encode(envelope), { reply: inbox });
 
-  // Note: stream subjects have no built-in backpressure. If the handler
-  // produces chunks faster than the caller consumes them, messages
-  // accumulate on the stream subject. For production use, consider
-  // JetStream with consumer rate limits or implement windowed flow control
-  // (e.g., caller publishes ack on mesh.task.{task_id}.ack every N chunks).
-
-  // Yield chunks as they arrive
-  let seq = 0;
-  const subIter = sub[Symbol.asyncIterator]();
-  const timeoutTimer = setTimeout(() => sub.unsubscribe(), timeoutMs);
+  const timeoutTimer = setTimeout(() => streamSub.unsubscribe(), timeoutMs);
 
   try {
-    while (true) {
-      const { value: msg, done } = await subIter.next();
-      if (done || !msg) break;
-
+    for await (const msg of streamSub) {
       const chunk = jc.decode(msg.data) as { seq: number; chunk: any; done: boolean; result?: any };
       if (chunk.done) {
-        sub.unsubscribe();
+        streamSub.unsubscribe();
         clearTimeout(timeoutTimer);
         if (chunk.result) yield chunk.result;
-        break;
+        return;
       }
-      if (chunk.seq !== seq) {
-        // Out of order — buffer and reorder in production
-        // For simplicity: yield anyway
-      }
-      seq = chunk.seq + 1;
       yield chunk.chunk;
     }
   } finally {
@@ -1827,15 +1902,110 @@ async *streamRequest(
   }
 }
 
-// onStreamRequest - handler side
+// onStreamRequest — handler side (add to Synapse class)
 onStreamRequest(
   skill: string,
   handler: (payload: any, ctx: { task_id: string; from: string }) => AsyncGenerator<any>
 ): void {
-  this._streamHandlers.set(skill, handler);
+  this.streamHandlers.set(skill, handler);
   console.log(`Stream handler "${skill}" registered`);
 }
 ```
+
+---
+
+## Long-Running Requests
+
+Some agents take longer than NATS's default request timeout to respond — LLM inference over 30s, API calls with many iterations, batch processing. Three strategies:
+
+### Strategy 1: Increase timeout on `request()` (simplest)
+
+```typescript
+// Pass explicit timeout as 4th argument (milliseconds)
+const result = await mesh.request(agentId, "fetch-incidents", { count: 10 }, 180_000); // 3 min
+```
+
+Works when the agent responds in one shot. NATS keeps the reply subject alive until the timeout expires.
+
+### Strategy 2: Use `streamRequest()` (recommended for LLM agents)
+
+Stream intermediate results so the caller sees progress, and the reply subject stays alive through the final `done: true` chunk.
+
+```typescript
+// Caller: stream results as they arrive
+for await (const chunk of mesh.streamRequest(agentId, "analyze", { text: "..." }, 300_000)) {
+  process.stdout.write(chunk.token ?? "");
+}
+
+// Handler: yield chunks incrementally
+mesh.onStreamRequest("analyze", async function* (payload) {
+  for (const chunk of processInChunks(payload.input.text)) {
+    yield { token: chunk };
+  }
+});
+```
+
+### Strategy 3: Stable reply subject (CLI / no SDK)
+
+When using `nats request` from the CLI or a language without the SDK, NATS's ephemeral reply subject may expire before a long-running agent responds.
+
+**Fix:** subscribe to a stable reply subject first, then publish the request:
+
+```bash
+# Terminal 1: subscribe first (keep alive)
+nats sub "_REPLY.myapp.$(date +%s)" --server nats://localhost:4222 --count 1 &
+SUB_PID=$!
+
+# Terminal 2: publish request with the stable reply subject
+REPLY="_REPLY.myapp.$(date +%s)"
+nats pub mesh.agent.grip-001.inbox \
+  '{"v":"1.0.0","type":"request","from":"cli","task_id":"t1","trace":{"trace_id":"r1","span_id":"s1"},"payload":{"skill":"fetch","input":{}}}' \
+  --reply "$REPLY" \
+  --server nats://localhost:4222
+```
+
+**Python equivalent** (used in production for Grip agent):
+
+```python
+import subprocess, json, uuid, datetime
+
+REPLY = f"_REPLY.{uuid.uuid4().hex[:8]}"
+
+# Start subscriber FIRST
+sub = subprocess.Popen(
+    ["nats", "sub", REPLY, "--server", "nats://localhost:4222", "--count", "1", "--raw"],
+    stdout=subprocess.PIPE, text=True
+)
+
+# Publish request with our stable reply subject
+envelope = {
+    "v": "1.0.0", "id": str(uuid.uuid4()), "type": "request",
+    "ts": datetime.datetime.now(datetime.UTC).isoformat(),
+    "from": "my-client", "to": "grip-001",
+    "task_id": str(uuid.uuid4()),
+    "trace": {"trace_id": str(uuid.uuid4()), "span_id": str(uuid.uuid4())},
+    "payload": {"text": "your prompt here"}
+}
+subprocess.run([
+    "nats", "pub", "mesh.agent.grip-001.inbox",
+    json.dumps(envelope), "--reply", REPLY,
+    "--server", "nats://localhost:4222"
+])
+
+# Wait for response (up to 5 minutes)
+out, _ = sub.communicate(timeout=300)
+print(json.loads(out))
+```
+
+### Decision guide
+
+| Agent response time | Strategy |
+|---|---|
+| < 30s | `request()` with default timeout |
+| 30s – 3min | `request()` with explicit timeout e.g. `180_000` |
+| > 3min or LLM streaming | `streamRequest()` / `onStreamRequest()` |
+| CLI / no SDK | Stable reply subject (subscribe first, then publish) |
+| Unknown / variable | `streamRequest()` — always safe, even for fast responses |
 
 ---
 
@@ -2013,6 +2183,7 @@ class ProtectedSynapse extends Synapse {
 | **~~No schema validation~~** | **Fixed.** See [schema.md](./schema.md) for JSON Schema definitions and Ajv-based validation for TypeScript. |
 | **~~No backpressure/flow control~~** | **Fixed.** See Backpressure section below — adaptive rate limiting, concurrency limits, and queue depth management built in. |
 | **~~Heartbeat inconsistency across SDKs~~** | **Fixed.** All SDKs now publish to `mesh.heartbeat.{id}` with a consistent envelope format. |
-| **~~No streaming request/reply~~** | **Fixed.** See [Streaming Primitives](#streaming-primitives) — `streamRequest()` / `onStreamRequest()` with async generators. Works with Anthropic SDK streaming. |
+| **~~No streaming request/reply~~** | **Fixed.** See [Streaming Primitives](#streaming-primitives) — `streamRequest()` / `onStreamRequest()` with async generators, wired via `streamHandlers` in `_setupRequestHandler`. Works with Anthropic SDK streaming. |
+| **Long-running requests (>30s)** | Use `streamRequest()` or pass explicit `timeoutMs` to `request()`. For CLI use, subscribe to a stable reply subject before publishing. See [Long-Running Requests](#long-running-requests). |
 | **~~No built-in conversation state / task persistence~~** | **Fixed.** See [tasks.md](./tasks.md) — JetStream-backed task store with state machine enforcement, `getTask()`, multi-turn conversation linking via `context_id`, and real-time dashboard support. |
 | **~~No HTTP bridge for REST agents~~** | **Fixed.** See [http-bridge.md](./http-bridge.md) — bidirectional bridge wraps any Flask/FastAPI/Express agent as a Synapse participant. Zero NATS code on the HTTP side. Webhook API for HTTP→Synapse calls. |
