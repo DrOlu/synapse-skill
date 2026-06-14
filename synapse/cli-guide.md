@@ -10,6 +10,7 @@ Build complete Synapse agents using only the `nats` binary — no SDK, no code, 
 - [Multi-Skill Agents](#multi-skill-agents)
 - [Heartbeat Implementation](#heartbeat-implementation)
 - [Real-World Patterns](#real-world-patterns)
+- [Timeouts & Long-Running Requests](#timeouts--long-running-requests)
 - [Limitations](#limitations)
 
 ---
@@ -18,14 +19,16 @@ Build complete Synapse agents using only the `nats` binary — no SDK, no code, 
 
 Every Synapse primitive maps directly to a `nats` CLI command:
 
-| Primitive | CLI Command | Example |
-|-----------|-------------|---------|
-| **register** | `nats pub` | `nats pub mesh.registry.register '{manifest}'` |
-| **discover** | `nats request` | `nats request mesh.registry.discover '{query}'` |
-| **request** | `nats request` | `nats request mesh.agent.bob-001.inbox '{request}'` |
-| **respond** | `nats reply` | `nats reply mesh.agent.bob-001.inbox '{response}'` |
-| **emit** | `nats pub` | `nats pub mesh.event.system.uptime '{event}'` |
-| **subscribe** | `nats sub` | `nats sub 'mesh.event.system.>' --count 5` |
+| Primitive | CLI Command | Example | Default timeout |
+|-----------|-------------|---------|----------------|
+| **register** | `nats pub` | `nats pub mesh.registry.register '{manifest}'` | — (fire and forget) |
+| **discover** | `nats request` | `nats request mesh.registry.discover '{query}' --timeout 2s` | **5 s** |
+| **request** | `nats request` | `nats request mesh.agent.bob-001.inbox '{req}' --timeout 30s` | **5 s** |
+| **respond** | `nats reply` | `nats reply mesh.agent.bob-001.inbox '{response}'` | — (waits indefinitely) |
+| **emit** | `nats pub` | `nats pub mesh.event.system.uptime '{event}'` | — (fire and forget) |
+| **subscribe** | `nats sub` | `nats sub 'mesh.event.system.>' --count 5` | — (blocks until count) |
+
+> **⚠️ Critical:** `nats request` defaults to **5 seconds**. Any agent that takes longer — LLM inference, API calls, multi-step reasoning — will silently time out. Always pass `--timeout` explicitly. For agents that may take minutes or hours, use the **Stable Reply Subject** pattern described in [Timeouts & Long-Running Requests](#timeouts--long-running-requests).
 
 ---
 
@@ -642,6 +645,254 @@ done
 
 ---
 
+## Timeouts & Long-Running Requests
+
+### The default timeout problem
+
+`nats request` has a **5-second default timeout**. When your agent takes longer than that — LLM inference (10–60s), external API calls (30–120s), complex multi-step reasoning (minutes), batch processing (hours) — the CLI exits with no reply and no error message, silently discarding the response when it arrives.
+
+```bash
+# This SILENTLY FAILS for any agent taking > 5s
+nats request mesh.agent.grip-001.inbox '{...}'
+
+# Always set an explicit timeout
+nats request mesh.agent.grip-001.inbox '{...}' --timeout 120s
+```
+
+---
+
+### Strategy 1 — Explicit timeout (up to ~10 minutes)
+
+Pass `--timeout` with a generous value. NATS keeps the ephemeral reply subject alive for the full duration.
+
+```bash
+# 2 minutes — for LLM agents and single API calls
+nats request mesh.agent.grip-001.inbox "$ENVELOPE" \
+  --server nats://localhost:4222 \
+  --timeout 120s
+
+# 10 minutes — for multi-step reasoning or slow external systems
+nats request mesh.agent.grip-001.inbox "$ENVELOPE" \
+  --server nats://localhost:4222 \
+  --timeout 600s
+```
+
+**Limit:** NATS ephemeral reply subjects expire after a server-configured maximum (default 5 minutes on most servers). For requests that may take longer, use Strategy 2.
+
+---
+
+### Strategy 2 — Stable reply subject (up to ~1 hour)
+
+Instead of `nats request` (which creates a short-lived ephemeral reply subject), subscribe to a **stable named subject** first, then publish the request with that subject as the reply-to. The subscription persists as long as your shell process is alive — completely independent of any server timeout.
+
+```bash
+#!/bin/bash
+# stable-request.sh — send to any long-running agent
+
+NATS_URL="nats://localhost:4222"
+AGENT_INBOX="mesh.agent.grip-001.inbox"
+REPLY="_REPLY.myapp.$(date +%s%N | md5sum | head -c 8)"
+TASK_ID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())")
+
+PROMPT="Your long-running task here..."
+
+ENVELOPE=$(jq -n \
+  --arg id    "$TASK_ID" \
+  --arg ts    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg from  "cli-client" \
+  --arg to    "grip-001" \
+  --arg tid   "$TASK_ID" \
+  --arg text  "$PROMPT" \
+  '{
+    v: "1.0.0", id: $id, type: "request",
+    ts: $ts, from: $from, to: $to, task_id: $tid,
+    trace: { trace_id: $id, span_id: $id },
+    payload: { text: $text, message: $text, prompt: $text }
+  }')
+
+echo "Task ID : $TASK_ID"
+echo "Reply   : $REPLY"
+echo "Sending to $AGENT_INBOX..."
+
+# 1. Subscribe FIRST (before publishing) — keeps reply subject alive
+nats sub "$REPLY" \
+  --server "$NATS_URL" \
+  --count 1 --raw > /tmp/synapse-reply-$TASK_ID.json &
+SUB_PID=$!
+sleep 0.3   # give subscriber time to connect
+
+# 2. Publish request with stable reply subject
+nats pub "$AGENT_INBOX" "$ENVELOPE" \
+  --reply "$REPLY" \
+  --server "$NATS_URL"
+
+echo "Waiting for response (up to 1 hour)..."
+wait $SUB_PID
+
+# 3. Parse and display response
+RESP=$(cat /tmp/synapse-reply-$TASK_ID.json)
+TEXT=$(echo "$RESP" | jq -r '.payload.text // .payload.result // .payload.message // "(no text)"')
+echo
+echo "=== RESPONSE ==="
+echo "$TEXT"
+rm -f /tmp/synapse-reply-$TASK_ID.json
+```
+
+---
+
+### Strategy 3 — JetStream durable consumer (up to 24 hours or indefinite)
+
+For requests that can take hours or where you need to disconnect and reconnect, use JetStream. The agent's response is persisted in a stream; you pull it when ready — even after restarting your terminal.
+
+#### Setup (run once)
+
+```bash
+# Create a response stream that retains messages for 24 hours
+nats stream add SYNAPSE_RESPONSES \
+  --subjects="synapse.responses.>" \
+  --storage=file \
+  --max-age=24h \
+  --max-msgs-per-subject=1 \
+  --description="Durable response store for long-running Synapse requests"
+
+# Create a pull consumer
+nats consumer add SYNAPSE_RESPONSES response_puller \
+  --deliver=all \
+  --ack=explicit \
+  --max-deliver=3
+```
+
+#### Send a long-running request
+
+```bash
+#!/bin/bash
+# durable-request.sh — fire-and-forget with JetStream response store
+
+NATS_URL="nats://localhost:4222"
+TASK_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
+REPLY_SUBJECT="synapse.responses.$TASK_ID"
+
+ENVELOPE=$(jq -n \
+  --arg id   "$TASK_ID" \
+  --arg ts   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg tid  "$TASK_ID" \
+  --arg text "Perform a 24-hour data processing job..." \
+  '{
+    v: "1.0.0", id: $id, type: "request",
+    ts: $ts, from: "cli-durable", task_id: $tid,
+    trace: { trace_id: $id, span_id: $id },
+    payload: { text: $text }
+  }')
+
+# Send — reply goes to the JetStream-backed subject
+nats pub "mesh.agent.grip-001.inbox" "$ENVELOPE" \
+  --reply "$REPLY_SUBJECT" \
+  --server "$NATS_URL"
+
+echo "Request sent. Task ID: $TASK_ID"
+echo "Reply will land at: $REPLY_SUBJECT"
+echo "Poll for response with:"
+echo "  nats next SYNAPSE_RESPONSES response_puller --wait 60s"
+echo "  # Or use collect-response.sh $TASK_ID"
+```
+
+#### Poll for the response (anytime, even after restart)
+
+```bash
+#!/bin/bash
+# collect-response.sh <task-id>
+# Can be run hours later — response is durably stored in JetStream
+
+TASK_ID="$1"
+NATS_URL="nats://localhost:4222"
+
+if [ -z "$TASK_ID" ]; then
+  echo "Usage: $0 <task-id>"
+  exit 1
+fi
+
+echo "Polling for response to task: $TASK_ID"
+echo "(Will check every 30s for up to 24 hours)\n"
+
+for i in $(seq 1 2880); do   # 2880 × 30s = 24 hours
+  MSG=$(nats next SYNAPSE_RESPONSES response_puller \
+    --filter "synapse.responses.$TASK_ID" \
+    --wait 30s --raw 2>/dev/null)
+
+  if [ -n "$MSG" ]; then
+    echo "=== RESPONSE RECEIVED (attempt $i) ==="
+    echo "$MSG" | jq -r '.payload.text // .payload.result // .'
+    nats consumer ack SYNAPSE_RESPONSES response_puller last
+    exit 0
+  fi
+
+  echo "[$(date +%H:%M:%S)] No response yet (attempt $i/2880)..."
+done
+
+echo "Timed out after 24 hours."
+exit 1
+```
+
+---
+
+### Strategy 4 — Emit progress events + subscribe (streaming over events)
+
+For very long jobs where you want live progress, have the agent emit progress events to a known subject while working, and subscribe to that event stream:
+
+```bash
+#!/bin/bash
+# stream-progress.sh — subscribe to progress events from a long-running agent
+
+NATS_URL="nats://localhost:4222"
+TASK_ID="$1"
+
+# Subscribe to progress events for this task
+nats sub "mesh.event.task.$TASK_ID.progress" \
+  --server "$NATS_URL" | while IFS= read -r line; do
+  TS=$(date +%H:%M:%S)
+  PCT=$(echo "$line" | jq -r '.payload.percent // "?"')
+  MSG=$(echo "$line" | jq -r '.payload.message // "(working)"')
+  echo "[$TS] $PCT% — $MSG"
+done
+```
+
+The agent emits to `mesh.event.task.{task_id}.progress` as it works.
+
+---
+
+### Decision guide
+
+| Expected response time | Strategy | Command / pattern |
+|---|---|---|
+| < 5s | `nats request` | `nats request ... --timeout 5s` |
+| 5s – 2min | Explicit timeout | `nats request ... --timeout 120s` |
+| 2min – 1hr | Stable reply subject | Subscribe first, then publish (Strategy 2) |
+| 1hr – 24hr | JetStream durable consumer | Fire-and-forget + poll later (Strategy 3) |
+| > 24hr or indefinite | Events + JetStream | Emit progress events + durable response (Strategy 4) |
+| Unknown / variable | Stable reply subject | Always safe — subscription stays alive as long as shell runs |
+
+---
+
+### Quick reference: timeout flags
+
+```bash
+# nats request — all timeout examples
+nats request <subject> '<payload>' --timeout 2s    # 2 seconds (discovery)
+nats request <subject> '<payload>' --timeout 30s   # 30 seconds (fast agents)
+nats request <subject> '<payload>' --timeout 120s  # 2 minutes (LLM agents)
+nats request <subject> '<payload>' --timeout 600s  # 10 minutes (complex tasks)
+
+# nats sub — no timeout by default (blocks until --count or Ctrl+C)
+nats sub <subject> --count 1    # exit after 1 message
+nats sub <subject> --count 10   # exit after 10 messages
+
+# nats next (JetStream pull) — wait for message
+nats next <stream> <consumer> --wait 30s   # poll with 30s window
+nats next <stream> <consumer> --wait 24h   # poll with 24-hour window
+```
+
+---
+
 ## Limitations
 
 ### What Pure CLI Agents Can Do Well
@@ -656,7 +907,7 @@ done
 
 ❌ **Dynamic request processing** — Can't read request, call LLM, compute response (see JetStream workaround above)
 ❌ **Complex skill routing** — Hard to dispatch requests to different handlers
-❌ **Long-running tasks** — Can't report task state transitions (working → input_required → completed)
+❌ **Long-running tasks** — `nats request` times out after 5s by default; use `--timeout`, stable reply subject, or JetStream (see [Timeouts & Long-Running Requests](#timeouts--long-running-requests))
 ❌ **State management** — No persistence across requests (without JetStream setup)
 ❌ **Error recovery** — Limited retry/timeout logic
 
@@ -670,6 +921,7 @@ Move from CLI to SDK when you need:
 - Production-grade error handling
 
 → See [TypeScript SDK](./typescript.md) or [Python SDK](./python.md) for full implementations.
+→ See [Long-Running Requests](./typescript.md#long-running-requests) for cross-SDK timeout patterns.
 
 ---
 
