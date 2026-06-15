@@ -19,6 +19,7 @@ This skill provides complete, runnable implementations for all architectures —
 - Want persistent, reliable messaging (JetStream) with distributed tracing built-in
 - Need peer-to-peer agent communication (not manager→worker hierarchies)
 - Require cryptographic identity verification (reject unauthorized callers with signed envelopes)
+- Send documents (PDF, DOCX, images, CSV) to agents for analysis over the mesh
 
 ## The 6 Primitives (Quick Reference)
 
@@ -44,6 +45,7 @@ This skill provides complete, runnable implementations for all architectures —
 
 ### Architecture & Patterns
 - **[patterns.md](./patterns.md)** — Real-world patterns: routing, delegation, fan-out, streaming, heartbeat
+- **[file-transfer.md](./file-transfer.md)** — Chunked file transfer protocol: send PDFs, images, CSVs to agents via NATS, auto-dispatched to target inbox
 - **[security.md](./security.md)** — NKeys, JWT auth, Ed25519, multi-tenant permissions, signed envelopes
 - **[acl.md](./acl.md)** — Cryptographic ACL: Ed25519 identity, trust store, key rotation, revocation
 - **[cross-org.md](./cross-org.md)** — Leaf node topology, firewall traversal, Acme↔Globex scenario
@@ -206,6 +208,7 @@ All agents speak Synapse: servers via TCP, browsers via WebSocket, HTTP services
 | Comparing with A2A/MCP | [Comparison Guide](./comparison.md) |
 | Need to rank agents by reliability | [Reputation Guide](./reputation.md) — Per-skill scoring, lying detection, discoverRanked |
 | Detect agents claiming skills they dont have | [Lying Detection](./reputation.md#lying-detection) — 3001 SKILL_NOT_FOUND tracking |
+| Send documents to agents for analysis | [File Transfer](./file-transfer.md) — Chunked transfer over NATS (init→chunks→done→dispatch) |
 
 ## Comparison with Other Protocols
 
@@ -296,6 +299,11 @@ nats request mesh.registry.discover '{"capabilities":["chat"]}'
 nats server report subs               # view subject subscriptions
 nats top                              # live connection stats
 nats rtt                              # latency test
+
+# File Transfer
+synapse-send-file report.pdf                                  # analyze a PDF
+synapse-send-file image.png --action extract                  # extract text from image
+synapse-send-file data.csv --target grip-cli-001 --via cloud  # send via Synadia Cloud
 ```
 
 ---
