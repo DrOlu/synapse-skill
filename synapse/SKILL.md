@@ -54,6 +54,7 @@ This skill provides complete, runnable implementations for all architectures —
 - **[registry.md](./registry.md)** — JetStream-backed registry service for deterministic discovery
 - **[tasks.md](./tasks.md)** — JetStream-backed task store: state machine persistence, conversation linking, querying
 - **[http-bridge.md](./http-bridge.md)** — Bidirectional HTTP↔Synapse bridge: wrap any REST/Flask/FastAPI agent as a Synapse participant
+- **[reputation.md](./reputation.md)** — Per-agent, per-skill reliability scoring and ranked discovery. Detects lying agents that claim capabilities they don't have.
 
 ### Reference
 - **[envelope.md](./envelope.md)** — Complete message envelope format, trace fields, error codes
@@ -64,6 +65,7 @@ This skill provides complete, runnable implementations for all architectures —
 ### Runnable Examples
 - **[examples/cli/](./examples/cli/)** — Bash scripts: static agents, monitors, log watchers
 - **[examples/acl/](./examples/acl/)** — Cryptographic ACL demo: signed envelopes, trust store, key rotation
+- **[examples/reputation/](./examples/reputation/)** — Reputation system demo: good/flaky/lying agents, auto-ranking, lying detection
 - **[examples/typescript/](./examples/typescript/)** — Full TypeScript projects (2-agent chat, event pipeline, routing)
 - **[examples/python/](./examples/python/)** — Full Python projects (LLM agents, delegation chains)
 - **[examples/go/](./examples/go/)** — Full Go projects (high-throughput mesh, JetStream persistence)
@@ -202,6 +204,8 @@ All agents speak Synapse: servers via TCP, browsers via WebSocket, HTTP services
 | Want observability/debugging | [Observability Guide](./observability.md) — OTel tracing, metrics, Grafana |
 | Need message validation | [Schema Guide](./schema.md) — JSON Schema for all message types |
 | Comparing with A2A/MCP | [Comparison Guide](./comparison.md) |
+| Need to rank agents by reliability | [Reputation Guide](./reputation.md) — Per-skill scoring, lying detection, discoverRanked |
+| Detect agents claiming skills they dont have | [Lying Detection](./reputation.md#lying-detection) — 3001 SKILL_NOT_FOUND tracking |
 
 ## Comparison with Other Protocols
 
