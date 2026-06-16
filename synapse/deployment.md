@@ -366,6 +366,10 @@ These are problems that are easy to miss, easy to debug if you know them, and ha
 - [ ] Fire-and-forget request (`nats pub`) doesn't show up in task queries → TaskStore operations are inside `if msg.reply:` block; move them outside
 - [ ] Task stuck in `working` forever → orphan detector didn't run, or heartbeat interval > mark-as-orphan threshold
 - [ ] Agent crashes and task goes to `failed` with code 3002 → this is correct behavior (orphan detection)
+- [ ] Agent processes one request at a time despite backend being parallel → `await backend.call()` blocks event loop; use `asyncio.create_task()` dispatch (Section 8)
+- [ ] Multiple requests overwhelm backend → add `asyncio.Semaphore(N)` gate around backend calls (Section 8)
+- [ ] Messages lost during agent restart → plain `nc.subscribe()` is ephemeral; use JetStream durable push consumer on `AGENT_INBOXES` stream (Section 9)
+- [ ] `nc.publish()` silently discards messages → called without `await`; always `await nc.publish(...)`
 
 ### Tasks
 
@@ -380,6 +384,13 @@ These are problems that are easy to miss, easy to debug if you know them, and ha
 - [ ] Tight restart loop after crash → `ThrottleInterval` missing
 - [ ] Agents fail to connect on boot → NATS not ready yet; agents retry with exponential backoff, no explicit ordering needed
 - [ ] Service log empty → `StandardOutPath` / `StandardErrorPath` missing or path doesn't exist
+
+### Web / Browser
+
+- [ ] Browser WebSocket connects but gets `ERR 'Authentication Timeout'` → `no_auth_user` must be inside the `websocket {}` block, not at top level
+- [ ] Browser fails to parse large responses → response spans multiple WebSocket frames; buffer across frames before slicing (Section 10)
+- [ ] NATS WS sends unreadable binary → set `ws.binaryType = 'arraybuffer'` and decode with `new TextDecoder()`
+- [ ] Gateway `/request` dispatches but returns empty → `await` missing on `nc.publish()` — message silently discarded
 
 ---
 
@@ -475,7 +486,223 @@ nats stream info TASK_STATE_LOG -s localhost:4222 | grep -E "Messages|Bytes|Maxi
 
 ---
 
-## 8. Suggested Extensions
+## 8. Concurrent Agents — Making Bridges Non-Blocking
+
+### The Problem
+
+The default pattern for a Synapse bridge is:
+
+```python
+async def _handle_inbox(self, msg):
+    result = await self.llm_client.chat(text)   # takes 10–270 seconds
+    await nc.publish(msg.reply, result)
+```
+
+This `await` inside the NATS callback **blocks the entire asyncio event loop** for the duration of every request. All other inbox messages queue behind it. The agent processes one task at a time — even if the underlying LLM API is fully parallel.
+
+**Before fixing, always verify the backend is actually parallel:**
+
+```python
+# Fire N requests concurrently against the backend
+results = await asyncio.gather(*[
+    client.chat(f"question {i}") for i in range(5)
+])
+# If all return in ~same time as 1 request: backend is parallel
+# If total time = N × single time: backend is serial
+```
+
+If the backend is parallel, the fix is two lines.
+
+### The Fix: Task Dispatch + Semaphore
+
+```python
+DEFAULT_MAX_CONCURRENT = 5
+
+class AgentBridge:
+    def __init__(self):
+        self._semaphore = asyncio.Semaphore(DEFAULT_MAX_CONCURRENT)
+        self._active_tasks = 0
+
+    async def _handle_inbox(self, msg) -> None:
+        # Returns immediately — event loop stays free for next message
+        asyncio.create_task(self._process_request(msg))
+
+    async def _process_request(self, msg) -> None:
+        self._active_tasks += 1
+        try:
+            # Semaphore gates actual backend calls — requests queue if at limit
+            async with self._semaphore:
+                result = await self.backend.chat(text)
+        except Exception as e:
+            self._active_tasks = max(0, self._active_tasks - 1)
+            # handle error, ack, return
+            return
+
+        # persist, reply ...
+        self._active_tasks = max(0, self._active_tasks - 1)
+        await msg.ack()     # JetStream ack — see section below
+```
+
+**Key rules:**
+- The semaphore MUST be acquired inside `_process_request`, not in `_handle_inbox`. Acquiring it in the callback defeats the non-blocking dispatch.
+- Always decrement `_active_tasks` in EVERY exit path (success, error, timeout). Missing one creates a counter leak.
+- The semaphore releases automatically when the `async with` block exits, even on exception.
+
+### Configurable Concurrency
+
+Expose `--max-concurrent` as a CLI argument so it can be tuned per deployment without code changes:
+
+```bash
+python3 bridge.py --max-concurrent 10    # high-throughput
+python3 bridge.py --max-concurrent 1     # serial mode for debugging
+```
+
+### Observed Performance
+
+Using grip CLI bridge (Python subprocess per request):
+
+| Requests | Before (serial) | After (concurrent, cap=5) | Speedup |
+|----------|----------------|---------------------------|---------|
+| 1 | ~15s | ~15s | 1× |
+| 5 | ~84s | ~21s | **4.0×** |
+| 10 | ~168s | ~42s | ~4× |
+
+The speedup approaches the concurrency cap. Beyond the cap, additional requests queue without overwhelming the backend.
+
+---
+
+## 9. Durable Inbox — Surviving Agent Restarts
+
+### Why Plain Subscribe Loses Messages
+
+`nc.subscribe("mesh.agent.x.inbox", cb=handler)` is ephemeral. When the agent disconnects (restart, NATS reload, launchd bounce), the subscription disappears. Any message published during that window is silently dropped — no error, no retry, no log entry on either side.
+
+This matters because launchd restarts agents automatically after crashes. The restart window is typically 3–10 seconds. Any request that arrives during that window is gone.
+
+### The Fix: JetStream Work-Queue Stream
+
+Create a stream that covers all agent inbox subjects. Messages published while agents are offline are buffered in memory and delivered when the consumer reconnects.
+
+**Create the stream (one-time setup):**
+
+```bash
+nats stream add AGENT_INBOXES \
+  --subjects="mesh.agent.*.inbox" \
+  --storage=memory \
+  --retention=workqueue \
+  --max-age=5m \
+  --max-msgs-per-subject=100
+```
+
+- `workqueue`: each message delivered once, removed after ack
+- `memory`: fast; use `file` if you need inbox messages to survive NATS server restarts
+- `max-age=5m`: discard undelivered messages after 5 minutes (prevents unbounded backlog)
+- `max-msgs-per-subject=100`: per-agent queue depth cap (backpressure if agent falls far behind)
+
+**Subscribe via durable push consumer instead of plain subscribe:**
+
+```python
+async def _setup_subscriptions(self):
+    js = self.nc.jetstream()
+    try:
+        await js.subscribe(
+            f"mesh.agent.{self.agent_id}.inbox",
+            durable=self.agent_id,      # consumer persists across reconnects
+            stream="AGENT_INBOXES",
+            manual_ack=True,            # we control when message is removed
+            cb=self._handle_inbox,
+        )
+    except Exception as e:
+        # Fallback if JetStream unavailable
+        await self.nc.subscribe(f"mesh.agent.{self.agent_id}.inbox", cb=self._handle_inbox)
+
+# After processing each message:
+try:
+    await msg.ack()     # removes from work-queue stream
+except Exception:
+    pass                # plain NATS msgs have no ack method — ignore
+```
+
+**Why `durable=self.agent_id`:** the durable name ties the consumer to a stable identity. When the agent reconnects, it resumes the same consumer and picks up any buffered messages. Without `durable`, each reconnect creates a new consumer and starts fresh, losing buffered messages.
+
+### Verification
+
+```bash
+# 1. Stop the agent
+launchctl unload ~/Library/LaunchAgents/com.example.synapse.agent.plist
+
+# 2. Publish messages while agent is down
+nats pub mesh.agent.my-agent.inbox '{"payload":{"text":"hello"}}' -s localhost:4222
+nats pub mesh.agent.my-agent.inbox '{"payload":{"text":"world"}}' -s localhost:4222
+
+# 3. Confirm messages are held in stream
+nats stream info AGENT_INBOXES -s localhost:4222
+# → Messages: 2
+
+# 4. Restart agent
+launchctl load ~/Library/LaunchAgents/com.example.synapse.agent.plist
+
+# 5. Verify delivery — both messages should now be processed
+```
+
+### The Catch
+
+Work-queue semantics give **at-least-once** delivery, not at-most-once. If the agent crashes after starting to process a message but before acking it, the message will be redelivered after the ack timeout. Your handler must be **idempotent** — or you must deduplicate using the task_id from the envelope.
+
+---
+
+## 10. Web Agent Integration
+
+For agents that cannot hold a raw NATS TCP connection (browsers, serverless functions, cloud-hosted AI), Synapse exposes itself via two additional transports.
+
+### NATS WebSocket (port 8443)
+
+Add to `nats.conf`:
+
+```conf
+websocket {
+  port: 8443
+  no_tls: true        # dev only; add cert/key for production
+  no_auth_user: local # must be INSIDE websocket block, not at top level
+}
+```
+
+**Critical detail:** `no_auth_user` at the top level of the config does not apply to WebSocket connections. It must be set inside the `websocket {}` block. Without it, browsers receive `ERR 'Authentication Timeout'` after the WebSocket upgrade.
+
+For browser SDK use, avoid the `nats.ws` npm package CDN — the file paths change between versions and the package is deprecated. Instead, write a ~150-line native WebSocket shim that speaks the NATS wire protocol directly:
+
+```
+INFO (receive) → CONNECT (send) → PING/PONG → PUB/SUB/MSG
+```
+
+Two browser-specific gotchas:
+1. NATS sends **binary WebSocket frames** — set `ws.binaryType = 'arraybuffer'` and decode with `new TextDecoder()`
+2. Large responses (agent manifests, task results) arrive across **multiple WebSocket frames** — buffer with `_buf += text` and wait until `_buf.length >= payload_size + 2` before slicing
+
+### HTTP REST Gateway
+
+Flask gateway that translates HTTP ↔ NATS. Install as a launchd service behind your reverse proxy.
+
+Endpoints:
+
+```
+GET  /health             → NATS + agent health
+POST /discover           → {"skill": "wema-bmc"}  → agent list
+POST /request            → {"skill": "...", "text": "..."}  → full task result
+GET  /task/<task_id>     → task state + result
+POST /cancel             → {"task_id": "..."}  → cancel
+GET  /stats              → per-state task counts
+```
+
+The `/request` endpoint blocks until the task completes (fire-and-forget to agent inbox + polling `mesh.task.get`). Returns the full task object including `result.text` (no truncation).
+
+**Critical bug to avoid:** `nc.publish()` in nats-py is an **async coroutine**. Calling it without `await` creates a coroutine that is immediately garbage-collected and never executed. The message is silently discarded. Always `await nc.publish(...)`.
+
+For a public gateway (used by Copilot plugins, Claude API tools, or CI pipelines), expose it behind Cloudflare Tunnel or a VPS reverse proxy with TLS. The gateway itself does not change — only the DNS and certificate layer.
+
+---
+
+## 11. Suggested Extensions
 
 These weren't built but are natural next steps:
 
