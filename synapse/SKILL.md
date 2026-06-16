@@ -58,6 +58,9 @@ This skill provides complete, runnable implementations for all architectures —
 - **[http-bridge.md](./http-bridge.md)** — Bidirectional HTTP↔Synapse bridge: wrap any REST/Flask/FastAPI agent as a Synapse participant
 - **[reputation.md](./reputation.md)** — Per-agent, per-skill reliability scoring and ranked discovery. Detects lying agents that claim capabilities they don't have.
 
+### Production Deployment
+- **[deployment.md](./deployment.md)** — Hard-won production patterns: multi-tenant NATS isolation, boot persistence (launchd/systemd), bridge-level TaskStore integration, control-plane CLI, known gotchas, real-world task case studies. Read this before going live.
+
 ### Reference
 - **[envelope.md](./envelope.md)** — Complete message envelope format, trace fields, error codes
 - **[states.md](./states.md)** — Task state machine and state transition rules
@@ -209,6 +212,7 @@ All agents speak Synapse: servers via TCP, browsers via WebSocket, HTTP services
 | Need to rank agents by reliability | [Reputation Guide](./reputation.md) — Per-skill scoring, lying detection, discoverRanked |
 | Detect agents claiming skills they dont have | [Lying Detection](./reputation.md#lying-detection) — 3001 SKILL_NOT_FOUND tracking |
 | Send documents to agents for analysis | [File Transfer](./file-transfer.md) — Chunked transfer over NATS (init→chunks→done→dispatch) |
+| Deploy a mesh for production (boot persistence, multi-tenant NATS, known gotchas) | [Deployment Guide](./deployment.md) — launchd/systemd services, 3-account isolation, bridge integration, operational CLI |
 
 ## Comparison with Other Protocols
 
@@ -237,6 +241,11 @@ Before going to production, verify:
 - [ ] OTLP endpoint is configured for trace/metric export
 - [ ] Circuit breakers protect overloaded agents (see [patterns.md](./patterns.md))
 - [ ] Backpressure / flow control enabled (concurrency limits, adaptive rate limiting)
+- [ ] NATS account isolation verified (see [deployment.md § 1](./deployment.md#1-nats-multi-tenant-isolation-the-1-gotcha))
+- [ ] JetStream store is on a persistent path (not `/tmp` — see [deployment.md § 2](./deployment.md#2-boot-persistence--platform-services))
+- [ ] Services are launchd-managed with `KeepAlive=true` and `ThrottleInterval=5`
+- [ ] Bridge TaskStore operations are outside `if msg.reply:` block (see [deployment.md § 3](./deployment.md#3-bridge-level-taskstore-integration-without-rewriting-the-agent))
+- [ ] Control-plane CLI supports fire-and-forget + poll (see [deployment.md § 4](./deployment.md#4-control-plane-cli-pattern))
 - [ ] Heartbeats use consistent format across all SDKs (`mesh.heartbeat.{id}` with envelope containing `{ v, id, type: "heartbeat", ts, from, payload: { agent_id, timestamp } }`)
 
 ## Troubleshooting
@@ -256,6 +265,12 @@ nats sub mesh.registry.register -s nats://localhost:4222 --count 1
 # (run in background, watch who registers)
 ```
 
+**JetStream API calls fail when using a leaf node:**
+- Almost always caused by missing account isolation (see [deployment.md § 1](./deployment.md#1-nats-multi-tenant-isolation-the-1-gotcha))
+- Check `curl http://localhost:8222/jsz` — `api.errors` should be 0
+- Verify `accounts {}` block has a dedicated LOCAL account with `jetstream: enabled` and a separate REMOTE account for the leaf
+- Ensure `system_account` points to a SYS account with NO JetStream
+
 **Cross-firewall connection fails:**
 - Leaf nodes must connect OUTBOUND only
 - Check firewall allows NATS port (4222 default)
@@ -267,7 +282,7 @@ nats sub mesh.registry.register -s nats://localhost:4222 --count 1
 - From CLI: subscribe to a stable reply subject BEFORE publishing the request (not after)
 - See [Long-Running Requests](./typescript.md#long-running-requests) for full patterns
 
-See [setup.md#troubleshooting](./setup.md#troubleshooting) for full troubleshooting guide.
+See [setup.md#troubleshooting](./setup.md#troubleshooting) for basic troubleshooting. For production-level gotchas (NATS isolation, task store bugs, boot persistence issues, bridge integration pitfalls), see [deployment.md § 5](./deployment.md#5-the-known-gotchas-checklist).
 
 ## Further Resources
 
