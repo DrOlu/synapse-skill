@@ -1,0 +1,56 @@
+version: "3.8"
+
+services:
+  nats:
+    image: nats:latest
+    command: ["-js", "-m", "8222", "--store_dir", "/data/jetstream"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats-data:/data/jetstream
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/varz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  reputation-service:
+    build: .
+    command: ["node", "dist/reputation-service.js"]
+    environment:
+      NATS_URL: "nats://nats:4222"
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+
+  good-agent:
+    build: .
+    command: ["node", "dist/good-agent.js"]
+    environment:
+      NATS_URL: "nats://nats:4222"
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  flaky-agent:
+    build: .
+    command: ["node", "dist/flaky-agent.js"]
+    environment:
+      NATS_URL: "nats://nats:4222"
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  lying-agent:
+    build: .
+    command: ["node", "dist/lying-agent.js"]
+    environment:
+      NATS_URL: "nats://nats:4222"
+    depends_on:
+      nats:
+        condition: service_healthy
+
+volumes:
+  nats-data:

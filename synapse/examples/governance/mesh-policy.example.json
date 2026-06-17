@@ -1,0 +1,45 @@
+{
+  "apiVersion": "governance.synapse/v1",
+  "name": "production-mesh-example",
+  "version": "1.0",
+  "default_action": "deny",
+  "rules": [
+    {
+      "name": "allow-chat",
+      "match": { "action": "chat" },
+      "effect": "allow",
+      "priority": 100,
+      "description": "Open chat for everyone"
+    },
+    {
+      "name": "finance-scoped",
+      "condition": "actor in [\"did:mesh:finance-bot\", \"did:mesh:treasury\"]",
+      "effect": "allow",
+      "priority": 120,
+      "description": "Finance agents may call finance skills"
+    },
+    {
+      "name": "block-destructive",
+      "match": { "tool": ["drop_table", "execute_shell", "delete_file"] },
+      "effect": "deny",
+      "priority": 200,
+      "description": "Destructive ops require human approval"
+    },
+    {
+      "name": "approve-send-email",
+      "match": { "action": "send_email" },
+      "effect": "require_approval",
+      "approvers": ["security-team"],
+      "priority": 150,
+      "description": "Outbound email requires security sign-off"
+    },
+    {
+      "name": "approve-deploy",
+      "match": { "action": "deploy" },
+      "effect": "require_approval",
+      "approvers": ["release-manager"],
+      "priority": 160,
+      "description": "Deploys require release-manager approval"
+    }
+  ]
+}

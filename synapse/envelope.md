@@ -57,6 +57,9 @@ Complete specification for Synapse message envelopes.
 | 3004 | IDENTITY_MISMATCH | no | Envelope `from` doesn't match manifest |
 | 4001 | OVERLOADED | yes | Agent too busy |
 | 4002 | RATE_LIMITED | yes | Too many requests |
+| 4003 | GOVERNANCE_DENIED | no | Action blocked by policy (see [governance.md](./governance.md)) |
+| 4004 | APPROVAL_REQUIRED | yes | Action requires approver sign-off (task → `input_required`) |
+| 4005 | POLICY_EVALUATION_FAILED | no | Gate could not evaluate (fail-closed → deny) |
 | 5001 | INTERNAL_ERROR | yes | Agent internal failure |
 
 ## Retry Strategy

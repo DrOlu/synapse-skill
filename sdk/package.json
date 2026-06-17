@@ -1,0 +1,110 @@
+{
+  "name": "synapse-nats-sdk",
+  "version": "2.3.0",
+  "description": "Synapse Protocol SDK - Multi-agent systems on NATS with streaming, HTTP bridges, cryptographic ACL, and reputation scoring",
+  "type": "module",
+  "main": "./dist/node/index.js",
+  "browser": "./dist/browser/index.js",
+  "types": "./dist/node/index.d.ts",
+  "exports": {
+    ".": {
+      "browser": {
+        "types": "./dist/browser/index.d.ts",
+        "import": "./dist/browser/index.js"
+      },
+      "node": {
+        "types": "./dist/node/index.d.ts",
+        "import": "./dist/node/index.js"
+      },
+      "default": {
+        "types": "./dist/node/index.d.ts",
+        "import": "./dist/node/index.js"
+      }
+    },
+    "./http-bridge": {
+      "types": "./dist/node/http-bridge.d.ts",
+      "import": "./dist/node/http-bridge.js"
+    },
+    "./acl": {
+      "types": "./dist/node/acl.d.ts",
+      "import": "./dist/node/acl.js"
+    },
+    "./governance": {
+      "types": "./dist/node/governance.d.ts",
+      "import": "./dist/node/governance.js"
+    },
+    "./reputation": {
+      "types": "./dist/node/reputation.d.ts",
+      "import": "./dist/node/reputation.js"
+    },
+    "./browser": {
+      "types": "./dist/browser/index.d.ts",
+      "import": "./dist/browser/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "npm run build:node && npm run build:browser",
+    "build:node": "tsc -p tsconfig.node.json",
+    "build:browser": "tsc -p tsconfig.browser.json",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "synapse",
+    "nats",
+    "multi-agent",
+    "agent-to-agent",
+    "distributed-systems",
+    "microservices",
+    "ai-agents",
+    "protocol",
+    "http-bridge",
+    "rest",
+    "flask",
+    "fastapi",
+    "websocket",
+    "browser",
+    "acl",
+    "ed25519",
+    "signed-envelopes",
+    "trust-store",
+    "key-rotation",
+    "reputation",
+    "ranking",
+    "reliability",
+    "agent-scoring",
+    "governance",
+    "policy-engine",
+    "actra",
+    "agt",
+    "agent-governance",
+    "guardrails",
+    "authorization",
+    "approval-workflow"
+  ],
+  "author": "hyperspaceng",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/drolu/synapse-skill"
+  },
+  "homepage": "https://www.skills.sh/drolu/synapse-skill/synapse",
+  "dependencies": {
+    "@nats-io/nats-core": "^3.0.0",
+    "@nats-io/transport-node": "^3.0.0",
+    "uuid": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.0.0",
+    "@types/uuid": "^10.0.0",
+    "express": "^5.2.1",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
