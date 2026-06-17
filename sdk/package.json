@@ -1,6 +1,6 @@
 {
   "name": "synapse-nats-sdk",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "description": "Synapse Protocol SDK - Multi-agent systems on NATS with streaming, HTTP bridges, cryptographic ACL, and reputation scoring",
   "type": "module",
   "main": "./dist/node/index.js",
