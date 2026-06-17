@@ -142,4 +142,4 @@ nats request mesh.agent.bob-001.inbox '{"text":"Hello Bob"}' -s nats://localhost
 
 ## License
 
-Apache 2.0
+MIT
