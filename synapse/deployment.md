@@ -123,6 +123,77 @@ nats kv add TEST_BUCKET -s localhost:4222
 # Information for Key-Value Store Bucket TEST_BUCKET ...    ← works locally
 ```
 
+### Follow-up Gotcha: Core-NATS Subject Leakage Across the Leaf
+
+The 3-account model isolates **JetStream** (`$JS.API.*`), but it does **not** isolate
+plain pub/sub subjects. Core-NATS messages flow across the leaf whenever *both* sides
+have matching subscription interest — and the cloud's subscription interest propagates
+into your local server. Symptom: `mesh.registry.discover` requests get answered by
+**remote cloud agents** racing your local `registry-service`, returning foreign or
+empty manifests. Cloud agents' heartbeats and register broadcasts also leak in.
+
+This is invisible in `jsz` (JetStream stays healthy) — you only notice it when
+discovery returns the wrong agents or unknown UUIDs appear in `mesh.heartbeat.>`.
+
+**The fix: `deny_imports` / `deny_exports` on the leaf remote.** These are the
+supported per-remote subject filters in nats-server (source: `server/opts.go` →
+`server/leafnode.go`; `deny_imports` → `perms.Subscribe.Deny`, `deny_exports` →
+`perms.Publish.Deny` on the leaf connection). They keep local-only `mesh.*` subjects
+from crossing the leaf in either direction, while leaving `mesh.event.shared.>` open
+for intentional cross-org events.
+
+```conf
+leafnodes {
+  remotes [
+    {
+      url: "tls://connect.ngs.global:7422"
+      creds: "/path/to/cloud.creds"
+      account: REMOTE
+
+      # Subjects we will NOT publish OUT to the cloud (local -> cloud blocked)
+      deny_exports: [
+        "mesh.registry.>"
+        "mesh.agent.>"
+        "mesh.heartbeat.>"
+        "mesh.task.>"
+      ]
+
+      # Subjects we will NOT accept IN from the cloud (cloud -> local blocked)
+      deny_imports: [
+        "mesh.registry.>"
+        "mesh.agent.>"
+        "mesh.heartbeat.>"
+        "mesh.task.>"
+      ]
+    }
+  ]
+}
+```
+
+> **Field name gotcha:** the config keys are `deny_imports` / `deny_exports` (also
+> singular `deny_import` / `deny_export`). The more obvious `permissions`,
+> `allow`, `deny`, `subject`, `subjects` are all **rejected** by the leaf-remote
+> parser — only `deny_imports`/`deny_exports` are valid on a leaf remote. Account-level
+> `mappings` do **not** work for this: they only transform subjects published by
+> clients *inside* the account, not traffic flowing through the leaf.
+
+**Verification — leaf traffic should be zero for the denied subjects:**
+```bash
+curl -s http://localhost:8222/leafz | jq '.leafs[0] | {account, in_msgs, out_msgs}'
+# {"account": "REMOTE", "in_msgs": 0, "out_msgs": 0}    ← nothing crossing
+
+# Local discovery now returns ONLY local agents, every time:
+nats request mesh.registry.discover '{}' -s localhost:4222
+# → {"from":"mesh-registry","payload":{"agents":[...local only...]}}
+```
+
+> **Still see foreign agents after applying this?** They are almost certainly
+> **local processes**, not the cloud. The leaf's `in_msgs`/`out_msgs` staying at 0
+> proves no cloud traffic is crossing — run `ps aux | grep -i agent` and look for
+> orphaned demo/example agent processes (e.g. `node chinook/db-agent.mjs`) that
+> subscribe to `mesh.registry.discover` locally. Kill them; their KV entries will
+> expire at the registry TTL.
+
 ---
 
 ## 2. Boot Persistence — Platform Services
@@ -358,6 +429,8 @@ These are problems that are easy to miss, easy to debug if you know them, and ha
 - [ ] JetStream store at `/tmp/nats/...` → data silently deletes on reboot
 - [ ] `nats kv add` works but `nats request` to JS API fails → likely same account-isolation issue
 - [ ] KV bucket "could not be recovered" after restart → store_dir moved/wiped, or bucket created under wrong account
+- [ ] `mesh.registry.discover` returns foreign/unknown agents or empty lists → cloud core-NATS subject leakage across the leaf; add `deny_imports`/`deny_exports` (Section 1, Follow-up Gotcha). If `leafz` shows `in_msgs=0`/`out_msgs=0`, the culprit is a **local** orphaned agent process, not the cloud — `ps aux | grep agent` and kill it
+- [ ] `AGENT_INBOXES` stream + all consumers vanish after nats-server restart → stream was `memory` storage; recreate with `--storage=file` (Section 9)
 
 ### Agents
 
@@ -369,6 +442,8 @@ These are problems that are easy to miss, easy to debug if you know them, and ha
 - [ ] Agent processes one request at a time despite backend being parallel → `await backend.call()` blocks event loop; use `asyncio.create_task()` dispatch (Section 8)
 - [ ] Multiple requests overwhelm backend → add `asyncio.Semaphore(N)` gate around backend calls (Section 8)
 - [ ] Messages lost during agent restart → plain `nc.subscribe()` is ephemeral; use JetStream durable push consumer on `AGENT_INBOXES` stream (Section 9)
+- [ ] Same request processed repeatedly, backend re-runs on every redelivery → no idempotency guard; check `task_store.get(task_id)` for terminal state and return cached result (Section 9, The Catch)
+- [ ] One bad request blocks the agent forever (redelivered every 30s) → consumer has no `max_deliver` cap; set `--max-deliver=5` (Section 9, Consumer Tuning)
 - [ ] `nc.publish()` silently discards messages → called without `await`; always `await nc.publish(...)`
 
 ### Tasks
@@ -581,23 +656,40 @@ This matters because launchd restarts agents automatically after crashes. The re
 
 ### The Fix: JetStream Work-Queue Stream
 
-Create a stream that covers all agent inbox subjects. Messages published while agents are offline are buffered in memory and delivered when the consumer reconnects.
+Create a stream that covers all agent inbox subjects. Messages published while agents are offline are buffered and delivered when the consumer reconnects.
 
 **Create the stream (one-time setup):**
 
 ```bash
 nats stream add AGENT_INBOXES \
   --subjects="mesh.agent.*.inbox" \
-  --storage=memory \
+  --storage=file \
   --retention=workqueue \
   --max-age=5m \
   --max-msgs-per-subject=100
 ```
 
 - `workqueue`: each message delivered once, removed after ack
-- `memory`: fast; use `file` if you need inbox messages to survive NATS server restarts
+- `file`: **use file storage, not memory.** Memory storage wipes the stream (and
+  every agent's durable consumer) on a nats-server restart — agents then crash-loop
+  with `stream not found` until someone recreates it. File storage survives reboots.
+  Use `memory` only for ephemeral dev where you accept losing buffered inboxes.
 - `max-age=5m`: discard undelivered messages after 5 minutes (prevents unbounded backlog)
 - `max-msgs-per-subject=100`: per-agent queue depth cap (backpressure if agent falls far behind)
+
+> **Recreate after a wipe:** if `AGENT_INBOXES` ever disappears (a memory-storage
+> stream that didn't survive a restart, an accidental `stream rm`), you can recreate
+> it with a JSON config to avoid the interactive prompt:
+> ```bash
+> cat > /tmp/agent_inboxes.json <<'EOF'
+> {"name":"AGENT_INBOXES","subjects":["mesh.agent.*.inbox"],"retention":"workqueue",
+>  "storage":"file","max_age":300000000000,"max_msgs_per_subject":100,
+>  "duplicate_window":120000000000,"num_replicas":1}
+> EOF
+> nats stream add --config /tmp/agent_inboxes.json -s localhost:4222
+> ```
+> Agents recreate their own durable consumers on reconnect, so no consumer
+> re-creation is needed — just bring the stream back.
 
 **Subscribe via durable push consumer instead of plain subscribe:**
 
@@ -625,6 +717,41 @@ except Exception:
 
 **Why `durable=self.agent_id`:** the durable name ties the consumer to a stable identity. When the agent reconnects, it resumes the same consumer and picks up any buffered messages. Without `durable`, each reconnect creates a new consumer and starts fresh, losing buffered messages.
 
+### Consumer Tuning: Poison-Message + Backpressure Caps
+
+The durable consumer is created with generous defaults (`max_ack_pending=1000`, no
+`max_deliver` cap). For LLM-backed agents whose backend calls take 8–270s each, both
+need tightening — apply them after first connect with `nats consumer update` (live,
+no restart):
+
+```bash
+nats consumer update AGENT_INBOXES <agent-id> \
+  --max-deliver=5 \
+  --max-pending=10 \
+  -s localhost:4222 --force
+```
+
+- **`--max-deliver=5`** — poison-message cap. Without it, a request that crashes the
+  bridge on every attempt is redelivered forever every `ack_wait` (30s), blocking the
+  agent indefinitely. With a cap, the message is dropped after N attempts instead of
+  looping. (Your handler should still fail the task via `task_store.fail(..., retryable=True)`
+  so callers see a 5001, not a silent drop.)
+- **`--max-pending=10`** — align the JetStream delivery buffer with the bridge's
+  `--max-concurrent` semaphore (e.g. set to `2× max-concurrent`). The default 1000 lets
+  JetStream buffer far more messages than the bridge can process, wasting memory; matching
+  the cap makes JetStream apply backpressure at the source instead of queueing internally.
+
+Keep `ack_wait` at 30s — short enough to redeliver after a real crash, long enough that a
+healthy 30s backend call doesn't spuriously redeliver. For backends that routinely exceed
+30s, raise `ack_wait` to match your `--timeout`.
+
+**Verify:**
+```bash
+nats consumer info AGENT_INBOXES <agent-id> -s localhost:4222 --json \
+  | jq '.config | {max_deliver, max_ack_pending, ack_wait}'
+# {"max_deliver": 5, "max_ack_pending": 10, "ack_wait": 30000000000}
+```
+
 ### Verification
 
 ```bash
@@ -648,6 +775,42 @@ launchctl load ~/Library/LaunchAgents/com.example.synapse.agent.plist
 ### The Catch
 
 Work-queue semantics give **at-least-once** delivery, not at-most-once. If the agent crashes after starting to process a message but before acking it, the message will be redelivered after the ack timeout. Your handler must be **idempotent** — or you must deduplicate using the task_id from the envelope.
+
+**Concrete idempotency guard** (put at the top of `_process_request`, before any work):
+
+```python
+task_id = request.get("task_id")
+if task_id and self.task_store:
+    try:
+        existing = await self.task_store.get(task_id)
+        if existing and existing.get("state") in ("completed", "failed", "canceled"):
+            cached = existing.get("result") or {}
+            print(f"[INBOX] Duplicate task {task_id[:16]}... already "
+                  f"{existing['state']} — returning cached result")
+            if msg.reply:
+                resp = self._envelope("respond", {
+                    "task_id": task_id,
+                    "text": cached.get("text", ""),
+                    "iterations": cached.get("iterations", 0),
+                    "session_key": cached.get("session_key", ""),
+                    "source": self.agent_id + "-cached",
+                }, trace=trace)
+                await self.nc.publish(msg.reply, json.dumps(resp).encode())
+            try:
+                await msg.ack()          # remove from work-queue, don't reprocess
+            except Exception:
+                pass
+            return
+    except Exception as e:
+        print(f"[INBOX][WARN] idempotency check failed: {e}")
+```
+
+This turns a redelivered request into a sub-millisecond cached reply instead of a
+full re-run of an 8–270s backend call. **Note:** the guard keys on `payload.task_id`
+— that's the same field the bridge passes to `task_store.create_task(task_id=...)`,
+so callers must supply a stable `task_id` in the request payload for the guard to fire.
+(Fire-and-forget clients that omit `task_id` get the bridge's generated UUIDv7 and
+are not deduped — acceptable, since they have no ID to redeliver under.)
 
 ---
 
