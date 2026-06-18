@@ -1,0 +1,155 @@
+# ──────────────────────────────────────────────────────────────────────
+# Synapse Mesh — Hardened NATS Config with Per-Agent NKey Permissions
+# ──────────────────────────────────────────────────────────────────────
+# Stage 2 of the identity rollout: NKey auth enforced, per-agent
+# least-privilege subject permissions. no_auth_user REMOVED.
+#
+# Key generation:
+#   nats auth nkey gen user --output ~/.synapse/nkeys/<agent-id>.seed
+#   nats auth nkey show ~/.synapse/nkeys/<agent-id>.seed  # -> public key
+#
+# Permission gotchas (each one took a debugging cycle to find):
+#   1. NATS KV subjects are UPPERCASE: $KV.BUCKETNAME.key (not $kv.bucketname.key)
+#      -> include BOTH "$kv.>" and "$KV.>" in publish allow lists
+#   2. JetStream API calls go to $JS.API.> — include "$JS.>" and "$JS.API.>"
+#   3. JetStream push consumers create internal _inbox.* reply subscriptions
+#      -> add "_inbox.>" to subscribe allow (lowercase, nats-py default prefix)
+#   4. Caller reply subjects like _REPLY.* are published BY the agent
+#      -> add "_REPLY.>" to publish allow
+#   5. nats-py's request() uses _INBOX.> (uppercase) for replies
+#      -> add BOTH "_INBOX.>" and "_inbox.>" to publish + subscribe
+#   6. Each agent that does KV operations (TASK_STORE) needs $KV.> in BOTH
+#      publish AND subscribe
+# ──────────────────────────────────────────────────────────────────────
+
+port: 4222
+http_port: 8222
+
+websocket {
+  port: 8443
+  no_tls: true
+}
+
+jetstream {
+  store_dir: "~/.nats/jetstream"
+  max_mem: 512M
+  max_file: 2G
+}
+
+# NO no_auth_user — every client must present NKey credentials.
+
+accounts {
+  SYS: {
+    users: [{ user: sys, password: "" }]
+  }
+
+  LOCAL: {
+    jetstream: enabled
+
+    users: [
+      # ── Agent: grip-cli-001 ──
+      # Scoped to own inbox + registry + heartbeat + task + approval subjects
+      {
+        nkey: <GRIP_CLI_001_PUBLIC_NKEY>
+        permissions: {
+          publish: {
+            allow: [
+              "mesh.agent.grip-cli-001.inbox",
+              "mesh.registry.register",
+              "mesh.registry.deregister",
+              "mesh.registry.discover",
+              "mesh.heartbeat.grip-cli-001",
+              "mesh.task.>",
+              "mesh.event.>",
+              "mesh.approval.>",
+              "mesh.audit.grip-cli-001.head",
+              "_INBOX.>", "_inbox.>", "_R_.>", "_REPLY.>",
+              "$JS.>", "$JS.API.>",
+              "$kv.>", "$KV.>"
+            ]
+          }
+          subscribe: {
+            allow: [
+              "mesh.agent.grip-cli-001.inbox",
+              "mesh.registry.discover",
+              "mesh.registry.reregister",
+              "mesh.approval.>",
+              "_INBOX.>", "_inbox.>", "$JS.>", "$KV.>"
+            ]
+          }
+        }
+      }
+
+      # ── Agent: omp-cli-001 ── (same shape, own subjects)
+      {
+        nkey: <OMP_CLI_001_PUBLIC_NKEY>
+        permissions: {
+          publish: {
+            allow: [
+              "mesh.agent.omp-cli-001.inbox",
+              "mesh.registry.register", "mesh.registry.deregister",
+              "mesh.registry.discover",
+              "mesh.heartbeat.omp-cli-001",
+              "mesh.task.>", "mesh.event.>", "mesh.approval.>",
+              "mesh.audit.omp-cli-001.head",
+              "_INBOX.>", "_inbox.>", "_R_.>", "_REPLY.>",
+              "$JS.>", "$JS.API.>", "$kv.>", "$KV.>"
+            ]
+          }
+          subscribe: {
+            allow: [
+              "mesh.agent.omp-cli-001.inbox",
+              "mesh.registry.discover", "mesh.registry.reregister",
+              "mesh.approval.>",
+              "_INBOX.>", "_inbox.>", "$JS.>", "$KV.>"
+            ]
+          }
+        }
+      }
+
+      # ── Service: registry-service (password auth, broad registry + KV access) ──
+      {
+        user: registry-service
+        password: ""
+        permissions: {
+          publish: { allow: ["mesh.registry.>", "_INBOX.>", "_inbox.>", "_R_.>", "_REPLY.>", "$JS.>", "$JS.API.>", "$kv.>", "$KV.>"] }
+          subscribe: { allow: ["mesh.registry.>", "_INBOX.>", "_inbox.>", "$JS.>"] }
+        }
+      }
+
+      # ── Service: task-service (orphan detection, heartbeats, task stats) ──
+      {
+        user: task-service
+        password: ""
+        permissions: {
+          publish: { allow: ["mesh.task.>", "mesh.heartbeat.>", "_INBOX.>", "_inbox.>", "_R_.>", "_REPLY.>", "$JS.>", "$JS.API.>", "$kv.>", "$KV.>"] }
+          subscribe: { allow: ["mesh.task.>", "mesh.heartbeat.>", "_INBOX.>", "_inbox.>", "$JS.>"] }
+        }
+      }
+
+      # ── Admin/CLI user for operational nats commands ──
+      {
+        user: admin
+        password: "change-me-in-production"
+        permissions: { publish: { allow: [">"] }, subscribe: { allow: [">"] } }
+      }
+    ]
+  }
+
+  REMOTE: {}
+}
+
+system_account: SYS
+
+# Leaf node isolation (see deployment.md §1 Follow-up Gotcha)
+leafnodes {
+  remotes [
+    {
+      url: "tls://connect.ngs.global:7422"
+      creds: "/path/to/cloud.creds"
+      account: REMOTE
+      deny_exports: ["mesh.registry.>", "mesh.agent.>", "mesh.heartbeat.>", "mesh.task.>"]
+      deny_imports: ["mesh.registry.>", "mesh.agent.>", "mesh.heartbeat.>", "mesh.task.>"]
+    }
+  ]
+}

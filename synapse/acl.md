@@ -890,6 +890,39 @@ mesh.onRequest("fetch-transactions", async (input, ctx) => {
 
 ---
 
+## Rolling Out Signed Envelopes (Verify-If-Signed Mode)
+
+Rolling out envelope signing across N agents requires a **transitional mode** —
+you can't flip from unsigned to strict-verify without rejecting messages during
+the rollout window. The pattern:
+
+1. **Deploy all agents with signing enabled** (sign-on-send) AND verify-if-signed
+   (accept both signed and unsigned on receive).
+2. **Test** — responses now carry `signature` / `from_identity` / `from_key_fingerprint`.
+3. **Flip to strict** — once all agents are signing, change the verify function to
+   reject unsigned envelopes.
+
+```python
+# Transitional (accept unsigned)
+def verify_envelope(env):
+    if not env.get("signature"):
+        return True, "unsigned"  # ← accept during rollout
+    # ... full Ed25519 verification
+
+# Strict (reject unsigned — once all agents sign)
+def verify_envelope(env):
+    if not env.get("signature"):
+        return False, "unsigned envelope rejected"  # ← flip after rollout
+    # ... full Ed25519 verification
+```
+
+This pattern is the difference between "signing works in theory" and "signing
+can actually be rolled out without taking the mesh down." For the full staged
+rollout methodology (DIDs → NKey auth → envelope signing), see
+**[identity-rollout.md](./identity-rollout.md)**.
+
+---
+
 ## Next Steps
 
 - [Security](./security.md) — NATS NKeys, JWT, TLS, signed envelopes

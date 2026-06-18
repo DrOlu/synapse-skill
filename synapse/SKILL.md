@@ -58,6 +58,7 @@ This skill provides complete, runnable implementations for all architectures —
 - **[http-bridge.md](./http-bridge.md)** — Bidirectional HTTP↔Synapse bridge: wrap any REST/Flask/FastAPI agent as a Synapse participant
 - **[reputation.md](./reputation.md)** — Per-agent, per-skill reliability scoring and ranked discovery. Detects lying agents that claim capabilities they don't have.
 - **[governance.md](./governance.md)** — Runtime policy, identity, and enforcement: AGT trust root + Actra in-mesh gate + EnforceCore tool-boundary enforcement. Closes the default-open gap with verifiable identity, enforceable authorization, PII redaction, and tamper-proof audit.
+- **[identity-rollout.md](./identity-rollout.md)** — Staged path to a hardened mesh: Stage 1 (DIDs + key fingerprints), Stage 2 (NKey auth + per-agent subject permissions), Stage 3 (Ed25519 envelope signing with verify-if-signed transitional mode). Includes permission gotchas and worked examples.
 
 ### Production Deployment
 - **[deployment.md](./deployment.md)** — Hard-won production patterns: multi-tenant NATS isolation, boot persistence (launchd/systemd), bridge-level TaskStore integration, control-plane CLI, known gotchas, real-world task case studies. Read this before going live.
@@ -69,6 +70,7 @@ This skill provides complete, runnable implementations for all architectures —
 - **[comparison.md](./comparison.md)** — How Synapse compares to A2A, MCP, ANP, RepoWire
 
 ### Runnable Examples
+- **[examples/identity/](./examples/identity/)** — Identity rollout: `envelope_signing.py` (Python Ed25519 sign/verify module), `nats.conf.hardened` (per-agent NKey permissions template with gotcha annotations)
 - **[examples/governance/](./examples/governance/)** — Governance integration: `enforcecore-bridge.py` (Python tool-boundary enforcement + redaction + Merkle audit), `mesh-policy.example.json` (Actra/AGT-compatible policy)
 - **[examples/cli/](./examples/cli/)** — Bash scripts: static agents, monitors, log watchers
 - **[examples/acl/](./examples/acl/)** — Cryptographic ACL demo: signed envelopes, trust store, key rotation
