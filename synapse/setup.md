@@ -67,6 +67,74 @@ nats-server --version
 nats --version
 ```
 
+**Python client (cross-platform):**
+```powershell
+pip install nats-py
+# nats-py is pure-Python + asyncio; works identically on Windows.
+# os.path.expanduser maps ~ -> %USERPROFILE%, so NKey seed paths like
+# ~/.synapse/nkeys/my-agent.seed resolve to C:\Users\<you>\.synapse\nkeys\my-agent.seed
+```
+
+**Configuration file (Windows paths):**
+
+Create `C:\ProgramData\nats\nats.conf`. JetStream `store_dir` **must be a
+persistent path** — never `%TEMP%` or a user roaming path, or data silently
+wipes on reboot:
+
+```conf
+port: 4222
+http_port: 8222
+
+websocket {
+  port: 8443
+  no_tls: true        # add tls {} block for production
+}
+
+jetstream {
+  store_dir: "C:\\ProgramData\\nats\\jetstream"   # PERSISTENT path
+  max_mem: 512M
+  max_file: 2G
+}
+
+system_account: SYS
+# accounts { SYS: ... LOCAL: { jetstream: enabled ... } REMOTE: {} }
+# See deployment.md §1 for the three-account isolation template.
+```
+
+Start with config (foreground):
+```powershell
+nats-server -c C:\ProgramData\nats\nats.conf
+```
+
+**Run as a background service (survives reboot):**
+
+Prefer NSSM (Non-Sucking Service Manager) so NATS and your agent bridges
+restart automatically on crash and boot:
+```powershell
+# Install NSSM: choco install nssm  (or download from nssm.cc)
+ni -ItemType Directory -Force -Path C:\ProgramData\nats\jetstream
+nssm install nats-server C:\NATS\nats-server.exe `-c C:\ProgramData\nats\nats.conf
+nssm set    nats-server AppStdout C:\ProgramData\nats\server.log
+nssm set    nats-server AppStderr C:\ProgramData\nats\server.err
+nssm set    nats-server AppRestartDelay 5000
+Start-Service nats-server
+Invoke-RestMethod http://localhost:8222/healthz   # {"status":"ok"}
+```
+
+Or use Task Scheduler (no extra software) — full details in
+[deployment.md §2 Windows](./deployment.md#windows--service--scheduled-task).
+
+**Firewall:** open the NATS/monitoring/WebSocket ports:
+```powershell
+New-NetFirewallRule -DisplayName "NATS" -Direction Inbound -LocalPort 4222,8222,8443 -Protocol TCP -Action Allow
+```
+
+**NKey seeds on Windows** live at `%USERPROFILE%\.synapse\nkeys\<agent>.seed`
+(`C:\Users\<you>\.synapse\nkeys\...`). The Python client and `cli.sh`
+(Git Bash/WSL) both expand `~` to `%USERPROFILE%`. The `synapse-client`
+skill ships a `windows` CLI subcommand that prints native PowerShell
+equivalents for `discover`/`request`/`emit`/`health`.
+
 ### Start Local Server (Basic)
 
 ```bash

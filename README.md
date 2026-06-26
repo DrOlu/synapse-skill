@@ -42,9 +42,40 @@ Or install to a specific agent:
 npx skills add DrOlu/synapse-skill -a claude-code
 ```
 
+## Two Skills in This Repo
+
+This repo packages **two installable skills**:
+
+| Skill | Path | What it is |
+|-------|------|------------|
+| **synapse** | [`synapse/`](./synapse/) | The complete protocol guide (90 files / 11,000+ lines): specs, SDK guides for TypeScript/Python/Go/CLI, runnable examples, HTTP bridge, ACL, cross-org, governance, deployment. |
+| **synapse-client** | [`synapse-client/`](./synapse-client/) | A single self-contained client skill: drop-in async Python client (`client.py`) + bash/PowerShell wrappers (`cli.sh`) to connect to and operate on **any** Synapse mesh. All 6 primitives, file transfer, heartbeats, durable tasks. Cross-platform (macOS/Linux/Windows). |
+
+### Install the full protocol skill
+
+```bash
+npx skills add DrOlu/synapse-skill --skill synapse -g -y
+```
+
+### Install the lightweight client skill only
+
+```bash
+npx skills add DrOlu/synapse-skill --skill synapse-client -g -y
+```
+
+Then use it from Python (`pip install nats-py`) or from the shell:
+
+```bash
+./cli.sh --nkey ~/.synapse/nkeys/my-agent.seed discover '[]'
+python client.py --nkey ~/.synapse/nkeys/my-agent.seed --id my-agent discover --cap chat
+./cli.sh windows          # print native PowerShell equivalents (no Git Bash needed)
+```
+
+---
+
 ## What's Inside
 
-This repository is **90 files / 11,000+ lines** of complete Synapse documentation and examples.
+This repository is **90 files / 11,000+ lines** of complete Synapse documentation and examples (plus the standalone `synapse-client` skill above).
 
 ### 📚 Core Documentation
 

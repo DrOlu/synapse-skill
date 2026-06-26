@@ -248,9 +248,103 @@ See existing Docker/systemd examples in [setup.md](./setup.md). The key addition
 - `After=nats-server.service` so agents wait for NATS
 - Restart=on-failure with RestartSec=5
 
+### Windows — Service / Scheduled Task
+
+On Windows, run `nats-server.exe` and agent bridges as background services so
+they survive logout and reboot. Two supported approaches:
+
+#### Option A: Windows Service via NSSM (recommended)
+
+[NSSM (Non-Sucking Service Manager)](https://nssm.cc/) wraps any executable
+as a native Windows Service with automatic restart and log redirection.
+
+```powershell
+# Install NSSM (Chocolatey: choco install nssm; or download from nssm.cc)
+
+# Create a persistent config + store
+ni -ItemType Directory -Force -Path C:\ProgramData\nats
+ni -ItemType Directory -Force -Path C:\ProgramData\nats\jetstream
+# Write nats.conf (use the three-account isolation template from §1)
+
+# Install nats-server as a service
+nssm install nats-server C:\NATS\nats-server.exe `-c C:\ProgramData\nats\nats.conf
+nssm set    nats-server AppDirectory C:\ProgramData\nats
+nssm set    nats-server AppStdout    C:\ProgramData\nats\server.log
+nssm set    nats-server AppStderr    C:\ProgramData\nats\server.err
+nssm set    nats-server AppRestartDelay 5000   # cap restart rate at 5s
+nssm set    nats-server Start SERVICE_AUTO_START
+
+# Start + verify
+Start-Service nats-server
+Get-Service nats-server
+Invoke-RestMethod http://localhost:8222/healthz
+```
+
+Agent bridges follow the same pattern — wrap the Python bridge:
+```powershell
+nssm install synapse-agent "C:\Path\To\python.exe" `"C:\Path\To\client.py" `--nkey C:\Users\<you>\.synapse\nkeys\my-agent.seed `--id my-agent `serve chat
+nssm set synapse-agent AppRestartDelay 5000
+Start-Service synapse-agent
+```
+
+Critical settings (mirroring the launchd/systemd guidance):
+- **`Start SERVICE_AUTO_START`** — start on boot (equivalent to `RunAtLoad: true`)
+- **`AppRestartDelay 5000`** — cap restart rate at 5s (equivalent to `ThrottleInterval: 5`)
+- NSSM auto-restarts on crash (equivalent to `KeepAlive: true`)
+
+Manage with standard Windows tooling:
+```powershell
+Stop-Service nats-server; Restart-Service nats-server
+sc.exe delete nats-server        # uninstall
+Get-EventLog -LogName Application -Source nssm -Newest 10
+```
+
+#### Option B: Task Scheduler (no extra software)
+
+For environments where you can't install NSSM, use Task Scheduler. Create a
+.task XML and register it:
+
+```powershell
+# Run whether user is logged on or not, at system startup, restart on failure
+$action  = New-ScheduledTaskAction  -Execute "C:\NATS\nats-server.exe" -Argument "-c C:\ProgramData\nats\nats.conf"
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$set     = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Seconds 5) -ExecutionTimeLimit ([TimeSpan]::Zero)
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName "synapse-nats" -Action $action -Trigger $trigger -Settings $set -Principal $principal
+Start-ScheduledTask -TaskName "synapse-nats"
+```
+
+### Windows notes & gotchas
+
+- **JetStream `store_dir` must be persistent.** Use `C:\ProgramData\nats\jetstream`
+  (survives reboot). Never `%TEMP%` or a user roaming path — data silently wipes.
+- **NKey seed paths** use backslashes: `%USERPROFILE%\.synapse\nkeys\<agent>.seed`.
+  The Python client (`nats-py`) is fully cross-platform; `os.path.expanduser`
+  maps `~` → `%USERPROFILE%`, so `nkey_seed_file="~/.synapse/nkeys/my.seed"` works
+  on Windows too. Forward slashes are also accepted.
+- **The `nats` CLI and `nats-server.exe`** have native Windows builds — no WSL
+  needed. The `synapse-client` skill's `cli.sh` runs under Git Bash/WSL, and
+  ships a `windows` subcommand that prints native PowerShell equivalents, or use
+  `client.py` directly:
+  ```powershell
+  pip install nats-py
+  python client.py --nkey $env:USERPROFILE\.synapse\nkeys\my-agent.seed --id my-agent discover --cap chat
+  ```
+- **WebSocket** (`ws://host:8443`) is handy for Windows agents behind a firewall
+  that blocks raw TCP 4222.
+- **Permissions file reload:** Windows `nats-server.exe` reloads config on
+  `SIGHUP`-equivalent via service control — use `Restart-Service nats-server`
+  after editing `nats.conf` (or send a reload via the monitoring API).
+- **Port conflicts:** Windows disables the legacy `nats-server -p`-only mode the
+  same way; ensure 4222/8222/8443 are open in Windows Defender Firewall:
+  ```powershell
+  New-NetFirewallRule -DisplayName "NATS" -Direction Inbound -LocalPort 4222,8222,8443 -Protocol TCP -Action Allow
+  ```
+
 ### Boot Order Resilience
 
-launchd/systemd don't guarantee order, but Synapse agents handle this gracefully:
+launchd/systemd/Windows Services don't guarantee strict ordering, but Synapse
+agents handle this gracefully:
 - NATS starts independently
 - Python agents use nats-py's default exponential backoff
 - After NATS is up (~1-2s), agents reconnect and re-register
@@ -459,6 +553,11 @@ These are problems that are easy to miss, easy to debug if you know them, and ha
 - [ ] Tight restart loop after crash → `ThrottleInterval` missing
 - [ ] Agents fail to connect on boot → NATS not ready yet; agents retry with exponential backoff, no explicit ordering needed
 - [ ] Service log empty → `StandardOutPath` / `StandardErrorPath` missing or path doesn't exist
+- [ ] **Windows:** service doesn't start after reboot → nssm service `Start` not set to `SERVICE_AUTO_START`, or Task Scheduler principal not `SYSTEM`
+- [ ] **Windows:** tight restart loop → `AppRestartDelay`/`RestartInterval` not set (should be 5s)
+- [ ] **Windows:** JetStream data lost after reboot → `store_dir` was `%TEMP%` or a roaming path; use `C:\ProgramData\nats\jetstream`
+- [ ] **Windows:** `Authorization Violation` from CLI → `~` path not expanded; use `$env:USERPROFILE\.synapse\nkeys\…` or expand `~` first
+- [ ] **Windows:** `nats` CLI connects but agent can't → Windows Defender Firewall blocking 4222/8222/8443; add an inbound TCP rule
 
 ### Web / Browser
 
